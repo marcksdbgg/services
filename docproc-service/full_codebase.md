@@ -3,13 +3,6 @@
 ```
 app/
 ├── __init__.py
-├── api
-│   ├── __init__.py
-│   └── v1
-│       ├── __init__.py
-│       ├── endpoints
-│       │   └── process_endpoint.py
-│       └── schemas.py
 ├── application
 │   ├── __init__.py
 │   ├── ports
@@ -23,7 +16,6 @@ app/
 │   ├── __init__.py
 │   ├── config.py
 │   └── logging_config.py
-├── dependencies.py
 ├── domain
 │   ├── __init__.py
 │   └── models.py
@@ -41,7 +33,11 @@ app/
 │       ├── md_adapter.py
 │       ├── pdf_adapter.py
 │       └── txt_adapter.py
-└── main.py
+├── main.py
+└── services
+    ├── __init__.py
+    ├── kafka_clients.py
+    └── s3_client.py
 ```
 
 # Codebase: `app`
@@ -49,160 +45,6 @@ app/
 ## File: `app\__init__.py`
 ```py
 
-```
-
-## File: `app\api\__init__.py`
-```py
-
-```
-
-## File: `app\api\v1\__init__.py`
-```py
-
-```
-
-## File: `app\api\v1\endpoints\process_endpoint.py`
-```py
-import structlog
-from fastapi import (
-    APIRouter, Depends, HTTPException, status,
-    UploadFile, File, Form
-)
-from typing import Optional
-
-from app.core.config import settings # Importa la instancia configurada globalmente
-from app.domain.models import ProcessResponse
-from app.application.use_cases.process_document_use_case import ProcessDocumentUseCase
-from app.application.ports.extraction_port import UnsupportedContentTypeError, ExtractionError
-from app.application.ports.chunking_port import ChunkingError
-from app.dependencies import get_process_document_use_case 
-
-router = APIRouter()
-log = structlog.get_logger(__name__)
-
-@router.post(
-    "/process",
-    response_model=ProcessResponse,
-    summary="Process a document to extract text and generate chunks.",
-    status_code=status.HTTP_200_OK,
-    responses={
-        status.HTTP_400_BAD_REQUEST: {"description": "Missing required form fields (file, original_filename, content_type)"},
-        status.HTTP_415_UNSUPPORTED_MEDIA_TYPE: {"description": "Content type not supported for processing"},
-        status.HTTP_422_UNPROCESSABLE_ENTITY: {"description": "File cannot be processed (e.g., corrupt, extraction error)"},
-        status.HTTP_500_INTERNAL_SERVER_ERROR: {"description": "An unexpected error occurred"},
-    }
-)
-async def process_document_endpoint(
-    file: UploadFile = File(..., description="The document file to process."),
-    original_filename: str = Form(..., description="Original filename of the uploaded document."),
-    content_type: str = Form(..., description="MIME content type of the document."),
-    document_id: Optional[str] = Form(None, description="Optional document ID for tracing purposes."),
-    company_id: Optional[str] = Form(None, description="Optional company ID for tracing purposes."),
-    use_case: ProcessDocumentUseCase = Depends(get_process_document_use_case) 
-):
-    endpoint_log = log.bind(
-        original_filename=original_filename,
-        content_type=content_type,
-        document_id_trace=document_id,
-        company_id_trace=company_id
-    )
-    endpoint_log.info("Received document processing request")
-
-    if not file or not original_filename or not content_type:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Missing one or more required fields: file, original_filename, content_type."
-        )
-    
-    normalized_content_type = content_type.lower()
-
-    # Loguear explícitamente los tipos soportados por settings EN ESTE PUNTO
-    endpoint_log.debug("Endpoint validation: Checking content_type against settings.SUPPORTED_CONTENT_TYPES", 
-                       received_content_type=content_type,
-                       normalized_content_type_to_check=normalized_content_type,
-                       settings_supported_content_types=settings.SUPPORTED_CONTENT_TYPES)
-
-    if normalized_content_type not in settings.SUPPORTED_CONTENT_TYPES:
-        endpoint_log.warning("Received unsupported content type after explicit check in endpoint", 
-                             received_type=content_type, 
-                             normalized_type=normalized_content_type, 
-                             supported_types_from_settings=settings.SUPPORTED_CONTENT_TYPES)
-        raise HTTPException(
-            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail=f"Content type '{content_type}' is not supported. Supported types from settings: {', '.join(settings.SUPPORTED_CONTENT_TYPES)}"
-        )
-
-    try:
-        file_bytes = await file.read()
-        if not file_bytes:
-            endpoint_log.warning("Received an empty file.")
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Uploaded file is empty."
-            )
-
-        endpoint_log.debug("File read into bytes", file_size=len(file_bytes))
-
-        response_data = await use_case.execute(
-            file_bytes=file_bytes,
-            original_filename=original_filename,
-            content_type=content_type, 
-            document_id_trace=document_id,
-            company_id_trace=company_id
-        )
-        
-        endpoint_log.info("Document processed successfully by use case.")
-        return ProcessResponse(data=response_data)
-
-    except UnsupportedContentTypeError as e:
-        endpoint_log.warning("Use case reported unsupported content type", error=str(e))
-        raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(e))
-    except (ExtractionError, ChunkingError) as e: 
-        endpoint_log.error("Processing error (extraction/chunking)", error_type=type(e).__name__, error_detail=str(e), exc_info=True)
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Failed to process document: {str(e)}")
-    except HTTPException as e: 
-        raise e
-    except Exception as e:
-        endpoint_log.exception("Unexpected error during document processing")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"An unexpected error occurred: {type(e).__name__}"
-        )
-    finally:
-        if file:
-            await file.close()
-            endpoint_log.debug("UploadFile closed.")
-```
-
-## File: `app\api\v1\schemas.py`
-```py
-# Re-exporting from domain models for clarity at API layer if needed,
-# or define specific API DTOs if they differ from domain models.
-# For this service, domain models are likely sufficient for API responses.
-
-from app.domain.models import (
-    ProcessResponse,
-    ProcessResponseData,
-    ProcessedDocumentMetadata,
-    ProcessedChunk,
-    ProcessedChunkSourceMetadata
-)
-
-__all__ = [
-    "ProcessResponse",
-    "ProcessResponseData",
-    "ProcessedDocumentMetadata",
-    "ProcessedChunk",
-    "ProcessedChunkSourceMetadata"
-]
-
-# Example of an API-specific request schema if multipart form is not directly used by Pydantic model
-# (FastAPI handles multipart form fields directly in endpoint signature)
-# class ProcessRequest(BaseModel):
-#     original_filename: str
-#     content_type: str
-#     document_id: Optional[str] = None # For tracing
-#     company_id: Optional[str] = None  # For tracing
 ```
 
 ## File: `app\application\__init__.py`
@@ -447,28 +289,13 @@ class ProcessDocumentUseCase:
 
 ## File: `app\core\config.py`
 ```py
-import logging
+# File: app/core/config.py
 import sys
 import json
+import logging
 from typing import List, Optional
-
-from pydantic import Field, field_validator, AnyHttpUrl, ValidationError
+from pydantic import Field, field_validator, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-# --- Defaults ---
-DEFAULT_PORT = 8005
-DEFAULT_CHUNK_SIZE = 1000
-DEFAULT_CHUNK_OVERLAP = 200
-DEFAULT_SUPPORTED_CONTENT_TYPES = [
-    "application/pdf",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # DOCX
-    "application/msword",  # DOC (will also be handled by docx_extractor typically)
-    "text/plain",
-    "text/markdown",
-    "text/html",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", # XLSX
-    "application/vnd.ms-excel" # XLS
-]
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -476,19 +303,33 @@ class Settings(BaseSettings):
         case_sensitive=False, extra='ignore'
     )
 
-    PROJECT_NAME: str = "Atenex Document Processing Service"
-    API_V1_STR: str = "/api/v1"
+    PROJECT_NAME: str = "Atenex Document Processing Worker"
     LOG_LEVEL: str = "INFO"
-    PORT: int = DEFAULT_PORT
 
-    CHUNK_SIZE: int = DEFAULT_CHUNK_SIZE
-    CHUNK_OVERLAP: int = DEFAULT_CHUNK_OVERLAP
-    SUPPORTED_CONTENT_TYPES: List[str] = Field(default_factory=lambda: DEFAULT_SUPPORTED_CONTENT_TYPES)
-
-    # Optional: If this service needs to call other internal services
-    # HTTP_CLIENT_TIMEOUT: int = 60
-    # HTTP_CLIENT_MAX_RETRIES: int = 3
-    # HTTP_CLIENT_BACKOFF_FACTOR: float = 0.5
+    # --- Lógica de procesamiento (se mantiene) ---
+    CHUNK_SIZE: int = 1000
+    CHUNK_OVERLAP: int = 200
+    SUPPORTED_CONTENT_TYPES: List[str] = [
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/msword",
+        "text/plain",
+        "text/markdown",
+        "text/html",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel",
+    ]
+    
+    # --- Kafka (NUEVO) ---
+    KAFKA_BOOTSTRAP_SERVERS: str = Field(description="Comma-separated list of Kafka bootstrap servers.")
+    KAFKA_CONSUMER_GROUP_ID: str = Field(default="docproc_workers", description="Kafka consumer group ID.")
+    KAFKA_INPUT_TOPIC: str = Field(default="documents.raw", description="Topic to consume raw document events from.")
+    KAFKA_OUTPUT_TOPIC: str = Field(default="chunks.processed", description="Topic to produce processed chunks to.")
+    KAFKA_AUTO_OFFSET_RESET: str = "earliest"
+    
+    # --- AWS S3 (NUEVO) ---
+    AWS_S3_BUCKET_NAME: str = Field(description="Name of the S3 bucket where original files are stored.")
+    AWS_REGION: str = Field(default="us-east-1", description="AWS region for S3 client.")
 
     @field_validator("LOG_LEVEL")
     @classmethod
@@ -499,78 +340,30 @@ class Settings(BaseSettings):
             raise ValueError(f"Invalid LOG_LEVEL '{v}'. Must be one of {valid_levels}")
         return normalized_v
 
-    @field_validator("SUPPORTED_CONTENT_TYPES", mode='before')
-    @classmethod
-    def assemble_supported_content_types(cls, v: Optional[str | List[str]]) -> List[str]:
-        if isinstance(v, str):
-            try:
-                parsed_list = json.loads(v)
-                if not isinstance(parsed_list, list) or not all(isinstance(item, str) for item in parsed_list):
-                    raise ValueError("If string, must be a JSON array of strings.")
-                # Convert to lowercase for consistent comparison
-                return [s.strip().lower() for s in parsed_list if s.strip()]
-            except json.JSONDecodeError:
-                if '[' not in v and ']' not in v:
-                     # Convert to lowercase for consistent comparison
-                    return [s.strip().lower() for s in v.split(',') if s.strip()]
-                raise ValueError("SUPPORTED_CONTENT_TYPES must be a valid JSON array of strings or a comma-separated string.")
-        elif isinstance(v, list) and all(isinstance(item, str) for item in v):
-            # Convert to lowercase for consistent comparison
-            return [s.strip().lower() for s in v if s.strip()]
-        elif v is None: 
-            # Convert to lowercase for consistent comparison
-            return [s.lower() for s in DEFAULT_SUPPORTED_CONTENT_TYPES]
-        raise ValueError("SUPPORTED_CONTENT_TYPES must be a list of strings or a JSON string array.")
-
-    @field_validator('CHUNK_SIZE', 'CHUNK_OVERLAP')
-    @classmethod
-    def check_positive_integer(cls, v: int, info) -> int:
-        if v < 0:
-            raise ValueError(f"{info.field_name} must be non-negative.")
-        return v
-
-    @field_validator('CHUNK_OVERLAP')
-    @classmethod
-    def check_overlap_less_than_size(cls, v: int, info) -> int:
-        chunk_size = info.data.get('CHUNK_SIZE', DEFAULT_CHUNK_SIZE)
-        if v >= chunk_size:
-            raise ValueError(f"CHUNK_OVERLAP ({v}) must be less than CHUNK_SIZE ({chunk_size}).")
-        return v
-
+# Configuración básica de logging para la fase de carga
 temp_log_config = logging.getLogger("docproc_service.config.loader")
 if not temp_log_config.handlers:
     handler = logging.StreamHandler(sys.stdout)
-    formatter = logging.Formatter('%(levelname)-8s [%(asctime)s] [%(name)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+    formatter = logging.Formatter('%(levelname)-8s [%(name)s] %(message)s')
     handler.setFormatter(formatter)
     temp_log_config.addHandler(handler)
     temp_log_config.setLevel(logging.INFO)
 
 try:
-    temp_log_config.info("Loading Document Processing Service settings...")
+    temp_log_config.info("Loading DocProc Worker settings...")
     settings = Settings()
-    temp_log_config.info("--- Document Processing Service Settings Loaded ---")
-    temp_log_config.info(f"  PROJECT_NAME:            {settings.PROJECT_NAME}")
-    temp_log_config.info(f"  LOG_LEVEL:               {settings.LOG_LEVEL}")
-    temp_log_config.info(f"  PORT:                    {settings.PORT}")
-    temp_log_config.info(f"  API_V1_STR:              {settings.API_V1_STR}")
-    temp_log_config.info(f"  CHUNK_SIZE:              {settings.CHUNK_SIZE}")
-    temp_log_config.info(f"  CHUNK_OVERLAP:           {settings.CHUNK_OVERLAP}")
-    temp_log_config.info(f"  SUPPORTED_CONTENT_TYPES: {settings.SUPPORTED_CONTENT_TYPES}")
-    temp_log_config.info(f"---------------------------------------------")
+    temp_log_config.info("--- DocProc Worker Settings Loaded ---")
+    temp_log_config.info(f"  PROJECT_NAME: {settings.PROJECT_NAME}")
+    temp_log_config.info(f"  LOG_LEVEL: {settings.LOG_LEVEL}")
+    temp_log_config.info(f"  CHUNK_SIZE: {settings.CHUNK_SIZE}")
+    temp_log_config.info(f"  AWS_S3_BUCKET_NAME: {settings.AWS_S3_BUCKET_NAME}")
+    temp_log_config.info(f"  KAFKA_BOOTSTRAP_SERVERS: {settings.KAFKA_BOOTSTRAP_SERVERS}")
+    temp_log_config.info(f"  KAFKA_INPUT_TOPIC: {settings.KAFKA_INPUT_TOPIC}")
+    temp_log_config.info(f"  KAFKA_OUTPUT_TOPIC: {settings.KAFKA_OUTPUT_TOPIC}")
+    temp_log_config.info("---------------------------------------------")
 
-except (ValidationError, ValueError) as e:
-    error_details_config = ""
-    if isinstance(e, ValidationError):
-        try: error_details_config = f"\nValidation Errors:\n{e.json(indent=2)}"
-        except Exception: error_details_config = f"\nRaw Errors: {e.errors()}"
-    temp_log_config.critical("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-    temp_log_config.critical(f"! FATAL: DocProc Service configuration validation failed:{error_details_config}")
-    temp_log_config.critical(f"! Check environment variables (prefixed with DOCPROC_) or .env file.")
-    temp_log_config.critical(f"! Original Error: {e}")
-    temp_log_config.critical("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-    sys.exit(1)
-except Exception as e_config:
-    temp_log_config.exception(f"FATAL: Unexpected error loading DocProc Service settings: {e_config}")
+except ValidationError as e:
+    temp_log_config.critical(f"FATAL: DocProc Worker configuration validation failed:\n{e}")
     sys.exit(1)
 ```
 
@@ -651,133 +444,6 @@ def setup_logging():
 
     log = structlog.get_logger(settings.PROJECT_NAME)
     log.info("Logging configured", log_level=settings.LOG_LEVEL)
-```
-
-## File: `app\dependencies.py`
-```py
-from functools import lru_cache
-from typing import Dict, Type, Optional 
-
-from app.application.ports.extraction_port import ExtractionPort
-from app.application.ports.chunking_port import ChunkingPort
-from app.application.use_cases.process_document_use_case import ProcessDocumentUseCase
-
-from app.infrastructure.extractors.pdf_adapter import PdfAdapter
-from app.infrastructure.extractors.docx_adapter import DocxAdapter
-from app.infrastructure.extractors.txt_adapter import TxtAdapter
-from app.infrastructure.extractors.html_adapter import HtmlAdapter
-from app.infrastructure.extractors.md_adapter import MdAdapter
-from app.infrastructure.extractors.excel_adapter import ExcelAdapter
-from app.infrastructure.chunkers.default_chunker_adapter import DefaultChunkerAdapter
-
-from app.core.config import settings # Importa la instancia configurada
-import structlog
-
-log = structlog.get_logger(__name__)
-
-# Los adaptadores individuales pueden seguir cacheados si su inicialización es costosa
-# y no dependen de configuraciones que cambian después del inicio.
-@lru_cache()
-def get_pdf_adapter() -> PdfAdapter:
-    return PdfAdapter()
-
-@lru_cache()
-def get_docx_adapter() -> DocxAdapter:
-    return DocxAdapter()
-
-@lru_cache()
-def get_txt_adapter() -> TxtAdapter:
-    return TxtAdapter()
-
-@lru_cache()
-def get_html_adapter() -> HtmlAdapter:
-    return HtmlAdapter()
-
-@lru_cache()
-def get_md_adapter() -> MdAdapter:
-    return MdAdapter()
-
-@lru_cache()
-def get_excel_adapter() -> ExcelAdapter:
-    return ExcelAdapter()
-
-# No cachear esta función para asegurar que siempre use el estado más reciente de `settings`
-# Aunque settings debería ser un singleton cargado al inicio, esto es para depuración extrema.
-def get_all_extraction_adapters() -> Dict[str, ExtractionPort]:
-    # Loguear el contenido de settings.SUPPORTED_CONTENT_TYPES aquí para depuración
-    log.debug("get_all_extraction_adapters: Using settings.SUPPORTED_CONTENT_TYPES", 
-              supported_types=settings.SUPPORTED_CONTENT_TYPES)
-              
-    adapters_definitions = {
-        "application/pdf": get_pdf_adapter(),
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": get_docx_adapter(),
-        "application/msword": get_docx_adapter(), 
-        "text/plain": get_txt_adapter(),
-        "text/html": get_html_adapter(),
-        "text/markdown": get_md_adapter(),
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": get_excel_adapter(), 
-        "application/vnd.ms-excel": get_excel_adapter(), 
-    }
-    
-    # settings.SUPPORTED_CONTENT_TYPES ya está en minúsculas gracias al validador en config.py
-    active_adapters = {
-        ct_key.lower(): adapter_instance
-        for ct_key, adapter_instance in adapters_definitions.items()
-        if ct_key.lower() in settings.SUPPORTED_CONTENT_TYPES
-    }
-    log.debug("get_all_extraction_adapters: Filtered active adapters", active_adapter_keys=list(active_adapters.keys()))
-    return active_adapters
-
-
-class FlexibleExtractionPort(ExtractionPort):
-    def __init__(self):
-        # Obtener los adaptadores al instanciar, sin lru_cache en get_all_extraction_adapters
-        self.adapters_map = get_all_extraction_adapters()
-        self.log = log.bind(component="FlexibleExtractionPort")
-        self.log.info("Initialized FlexibleExtractionPort with adapters", adapters_found=list(self.adapters_map.keys()))
-
-    def extract_text(self, file_bytes: bytes, filename: str, content_type: str):
-        content_type_lower = content_type.lower()
-        self.log.debug("FlexibleExtractionPort: Attempting extraction", filename=filename, content_type=content_type_lower)
-        
-        adapter_to_use: Optional[ExtractionPort] = self.adapters_map.get(content_type_lower)
-        
-        if not adapter_to_use and content_type_lower == "application/msword":
-             adapter_to_use = self.adapters_map.get("application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-
-        if adapter_to_use:
-            self.log.info(f"Using adapter {type(adapter_to_use).__name__} for {content_type_lower}")
-            return adapter_to_use.extract_text(file_bytes, filename, content_type_lower)
-        else:
-            self.log.warning("No suitable adapter found for content type in FlexibleExtractionPort", 
-                             content_type_provided=content_type, 
-                             content_type_lower=content_type_lower, 
-                             available_adapters_in_map=list(self.adapters_map.keys()))
-            from app.application.ports.extraction_port import UnsupportedContentTypeError
-            raise UnsupportedContentTypeError(f"FlexibleExtractionPort: No configured adapter for content type: {content_type}")
-
-# No cachear esta función por ahora
-def get_flexible_extraction_port() -> ExtractionPort:
-    return FlexibleExtractionPort()
-
-
-@lru_cache()
-def get_default_chunker_adapter() -> ChunkingPort:
-    return DefaultChunkerAdapter()
-
-# No cachear el use case principal si sus dependencias no están cacheadas y queremos la última config
-def get_process_document_use_case() -> ProcessDocumentUseCase:
-    extraction_port = get_flexible_extraction_port()
-    chunking_port = get_default_chunker_adapter()
-    
-    log.info("Creating ProcessDocumentUseCase instance (dependencies potentially not cached)", 
-             extraction_port_type=type(extraction_port).__name__,
-             chunking_port_type=type(chunking_port).__name__)
-    
-    return ProcessDocumentUseCase(
-        extraction_port=extraction_port,
-        chunking_port=chunking_port
-    )
 ```
 
 ## File: `app\domain\__init__.py`
@@ -1286,200 +952,306 @@ class TxtAdapter(BaseExtractorAdapter):
 
 ## File: `app\main.py`
 ```py
-import time
+# File: app/main.py (Reemplazado)
+import sys
+import os
+import json
 import uuid
+import tempfile
+import pathlib
+import asyncio
 import structlog
-from contextlib import asynccontextmanager
+from typing import Dict, Any
 
-from fastapi import FastAPI, Request, status as fastapi_status
-from fastapi.responses import JSONResponse, PlainTextResponse
-from fastapi.exceptions import RequestValidationError, ResponseValidationError, HTTPException
-
-# Setup logging first
+# Configurar logging primero que nada
 from app.core.logging_config import setup_logging
-setup_logging() # Initialize logging system
+setup_logging()
 
-# Then import other modules that might use logging
 from app.core.config import settings
-from app.api.v1.endpoints import process_endpoint
+from app.services.kafka_clients import KafkaConsumerClient, KafkaProducerClient
+from app.services.s3_client import S3Client, S3ClientError
+from app.application.use_cases.process_document_use_case import ProcessDocumentUseCase
+from app.dependencies import get_process_document_use_case # Reutilizamos el inyector
 
-log = structlog.get_logger(settings.PROJECT_NAME)
+log = structlog.get_logger(__name__)
 
-# --- Lifespan Management ---
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    log.info(f"{settings.PROJECT_NAME} startup sequence initiated...")
-    # Add any async resource initialization here (e.g., DB pools if needed)
-    # For docproc-service, it's mostly stateless or initializes resources per request/use case.
-    log.info(f"{settings.PROJECT_NAME} is ready and running.")
-    yield
-    # Add any async resource cleanup here
-    log.info(f"{settings.PROJECT_NAME} shutdown sequence initiated...")
-    log.info(f"{settings.PROJECT_NAME} shutdown complete.")
+def main():
+    """Punto de entrada principal para el worker de procesamiento de documentos."""
+    log.info("Initializing DocProc Worker...", config=settings.model_dump(exclude=['SUPPORTED_CONTENT_TYPES']))
 
-# --- FastAPI App Instance ---
-app = FastAPI(
-    title=settings.PROJECT_NAME,
-    openapi_url=f"{settings.API_V1_STR}/openapi.json",
-    version="0.1.0",
-    description="Atenex Document Processing Service for text extraction and chunking.",
-    lifespan=lifespan
-)
-
-# --- Middlewares ---
-@app.middleware("http")
-async def add_request_context_timing_logging(request: Request, call_next):
-    start_time = time.perf_counter()
-    request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
-    
-    structlog.contextvars.bind_contextvars(request_id=request_id)
-    # For access in endpoint logs if not using contextvars directly there
-    request.state.request_id = request_id 
-
-    req_log = log.bind(method=request.method, path=request.url.path, client_host=request.client.host if request.client else "unknown")
-    req_log.info("Request received")
-
-    response = None
     try:
-        response = await call_next(request)
-        process_time_ms = (time.perf_counter() - start_time) * 1000
-        
-        resp_log = req_log.bind(status_code=response.status_code, duration_ms=round(process_time_ms, 2))
-        log_level_method = "warning" if 400 <= response.status_code < 500 else "error" if response.status_code >= 500 else "info"
-        getattr(resp_log, log_level_method)("Request finished") # Use getattr to call log method
-
-        response.headers["X-Request-ID"] = request_id
-        response.headers["X-Process-Time-Ms"] = f"{process_time_ms:.2f}"
+        consumer = KafkaConsumerClient(topics=[settings.KAFKA_INPUT_TOPIC])
+        producer = KafkaProducerClient()
+        s3_client = S3Client()
+        use_case: ProcessDocumentUseCase = get_process_document_use_case()
     except Exception as e:
-        process_time_ms = (time.perf_counter() - start_time) * 1000
-        exc_log = req_log.bind(status_code=500, duration_ms=round(process_time_ms, 2)) # Default to 500 for unhandled
-        exc_log.exception("Unhandled exception during request processing") # Logs with traceback
-        
-        response = JSONResponse(
-            status_code=fastapi_status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"detail": "Internal Server Error", "request_id": request_id}
-        )
-        response.headers["X-Request-ID"] = request_id
-        response.headers["X-Process-Time-Ms"] = f"{process_time_ms:.2f}"
+        log.critical("Failed to initialize worker dependencies", error=str(e), exc_info=True)
+        sys.exit(1)
+
+    log.info("Worker initialized successfully. Starting message consumption loop...")
+    
+    try:
+        for msg in consumer.consume():
+            process_message(msg, s3_client, use_case, producer)
+            consumer.commit(message=msg)
+    except KeyboardInterrupt:
+        log.info("Shutdown signal received.")
+    except Exception as e:
+        log.critical("Critical error in consumer loop. Exiting.", error=str(e), exc_info=True)
     finally:
-         structlog.contextvars.clear_contextvars()
-    return response
+        log.info("Closing worker resources...")
+        consumer.close()
+        producer.flush()
+        log.info("Worker shut down gracefully.")
 
 
-# --- Exception Handlers ---
-@app.exception_handler(HTTPException)
-async def custom_http_exception_handler(request: Request, exc: HTTPException):
-    request_id = getattr(request.state, 'request_id', 'N/A')
-    log_method = log.warning if exc.status_code < 500 else log.error
-    log_method(
-        "HTTP Exception caught", 
-        status_code=exc.status_code, 
-        detail=exc.detail,
-        request_id=request_id
-    )
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"detail": exc.detail, "request_id": request_id},
-        headers=getattr(exc, "headers", None),
-    )
+def process_message(msg, s3_client: S3Client, use_case: ProcessDocumentUseCase, producer: KafkaProducerClient):
+    """Procesa un único mensaje de Kafka."""
+    try:
+        event_data = json.loads(msg.value().decode('utf-8'))
+        log_context = {
+            "kafka_topic": msg.topic(),
+            "kafka_partition": msg.partition(),
+            "kafka_offset": msg.offset(),
+            "document_id": event_data.get("document_id"),
+            "company_id": event_data.get("company_id"),
+        }
+        msg_log = log.bind(**log_context)
+        msg_log.info("Received new message to process.")
 
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    request_id = getattr(request.state, 'request_id', 'N/A')
-    log.warning("Request Validation Error", errors=exc.errors(), path=request.url.path, request_id=request_id)
-    return JSONResponse(
-        status_code=fastapi_status.HTTP_422_UNPROCESSABLE_ENTITY,
-        content={"detail": "Validation Error", "errors": exc.errors(), "request_id": request_id},
-    )
+        s3_path = event_data.get("s3_path")
+        document_id = event_data.get("document_id")
+        content_type = guess_content_type(s3_path) # Inferir de la ruta/nombre de archivo
 
-@app.exception_handler(ResponseValidationError)
-async def response_validation_error_handler(request: Request, exc: ResponseValidationError):
-    request_id = getattr(request.state, 'request_id', 'N/A')
-    log.error("Response Validation Error", errors=exc.errors(), path=request.url.path, request_id=request_id, exc_info=True)
-    return JSONResponse(
-        status_code=fastapi_status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"detail": "Internal Error: Response validation failed", "errors": exc.errors(), "request_id": request_id},
-    )
+        if not all([s3_path, document_id, content_type]):
+            msg_log.error("Message is missing required fields: s3_path, document_id, or content_type cannot be inferred.")
+            return
 
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    request_id = getattr(request.state, 'request_id', 'N/A')
-    log.exception("Unhandled global exception caught", path=request.url.path, request_id=request_id) # Ensures full traceback
-    return JSONResponse(
-        status_code=fastapi_status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"detail": "An unexpected internal server error occurred.", "request_id": request_id}
-    )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            local_path = pathlib.Path(temp_dir) / os.path.basename(s3_path)
+            s3_client.download_file_sync(s3_path, str(local_path))
+            file_bytes = local_path.read_bytes()
 
-# --- API Router Inclusion ---
-app.include_router(process_endpoint.router, prefix=settings.API_V1_STR, tags=["Document Processing"])
-log.info(f"Included processing router with prefix: {settings.API_V1_STR}")
+        msg_log.info("File downloaded from S3, proceeding with processing.", file_size=len(file_bytes))
+        
+        # Ejecutar el caso de uso asíncrono
+        process_response_data = asyncio.run(use_case.execute(
+            file_bytes=file_bytes,
+            original_filename=os.path.basename(s3_path),
+            content_type=content_type,
+            document_id_trace=document_id
+        ))
+
+        # Producir un mensaje por cada chunk
+        chunks = process_response_data.chunks
+        msg_log.info(f"Document processed. Found {len(chunks)} chunks to produce.")
+        
+        for i, chunk in enumerate(chunks):
+            chunk_id = str(uuid.uuid4())
+            page_number = chunk.source_metadata.page_number
+            
+            output_payload = {
+                "chunk_id": chunk_id,
+                "document_id": document_id,
+                "text": chunk.text,
+                "page": page_number if page_number is not None else -1
+            }
+            producer.produce(
+                topic=settings.KAFKA_OUTPUT_TOPIC,
+                key=document_id, # Particionar por document_id para mantener el orden de los chunks
+                value=output_payload
+            )
+
+        msg_log.info("All chunks produced to output topic.", num_chunks=len(chunks))
+
+    except json.JSONDecodeError:
+        log.error("Failed to decode Kafka message value", raw_value=msg.value())
+    except S3ClientError as e:
+        log.error("Failed to process message due to S3 error", error=str(e), exc_info=True)
+    except Exception as e:
+        log.error("Unhandled error processing message", error=str(e), exc_info=True)
 
 
-# --- Health Check Endpoint ---
-@app.get(
-    "/health",
-    tags=["Health Check"],
-    summary="Performs a health check of the service.",
-    response_description="Returns the health status of the service.",
-    status_code=fastapi_status.HTTP_200_OK,
-)
-async def health_check():
-    log.debug("Health check endpoint called")
-    return {
-        "status": "ok",
-        "service": settings.PROJECT_NAME,
-        "version": app.version # FastAPI app version
-    }
+def guess_content_type(filename: str) -> Optional[str]:
+    """Intenta adivinar el content-type a partir de la extensión del archivo."""
+    import mimetypes
+    content_type, _ = mimetypes.guess_type(filename)
+    if content_type is None:
+        if filename.lower().endswith('.md'):
+            return 'text/markdown'
+    return content_type
 
-# --- Root Endpoint ---
-@app.get("/", include_in_schema=False)
-async def root():
-    return PlainTextResponse(f"{settings.PROJECT_NAME} is running.")
 
 if __name__ == "__main__":
-    import uvicorn
-    log.info(f"Starting {settings.PROJECT_NAME} locally on port {settings.PORT}")
-    uvicorn.run(
-        "app.main:app",
-        host="0.0.0.0",
-        port=settings.PORT,
-        log_level=settings.LOG_LEVEL.lower(),
-        reload=True # Enable reload for local development
-    )
+    main()
+```
 
-# === 0.1.0 ===
-# - jfu 2
+## File: `app\services\__init__.py`
+```py
+
+```
+
+## File: `app\services\kafka_clients.py`
+```py
+# File: app/services/kafka_clients.py
+import json
+import structlog
+from confluent_kafka import Consumer, Producer, KafkaError, KafkaException
+from typing import Optional, Generator, Any, Dict
+
+from app.core.config import settings
+
+log = structlog.get_logger(__name__)
+
+# --- Kafka Producer ---
+class KafkaProducerClient:
+    def __init__(self):
+        producer_config = {
+            'bootstrap.servers': settings.KAFKA_BOOTSTRAP_SERVERS,
+            'acks': 'all',
+        }
+        self.producer = Producer(producer_config)
+        self.log = log.bind(component="KafkaProducerClient")
+
+    def _delivery_report(self, err, msg):
+        if err is not None:
+            self.log.error(f"Message delivery failed to topic '{msg.topic()}'", error=str(err))
+        else:
+            self.log.debug(f"Message delivered to {msg.topic()} [{msg.partition()}]")
+
+    def produce(self, topic: str, key: str, value: Dict[str, Any]):
+        try:
+            self.producer.produce(
+                topic,
+                key=key.encode('utf-8'),
+                value=json.dumps(value).encode('utf-8'),
+                callback=self._delivery_report
+            )
+        except KafkaException as e:
+            self.log.exception("Failed to produce message", error=str(e))
+            raise
+
+    def flush(self, timeout: float = 10.0):
+        self.log.info(f"Flushing producer with a timeout of {timeout}s...")
+        self.producer.flush(timeout)
+        self.log.info("Producer flushed.")
+
+# --- Kafka Consumer ---
+class KafkaConsumerClient:
+    def __init__(self, topics: list[str]):
+        consumer_config = {
+            'bootstrap.servers': settings.KAFKA_BOOTSTRAP_SERVERS,
+            'group.id': settings.KAFKA_CONSUMER_GROUP_ID,
+            'auto.offset.reset': settings.KAFKA_AUTO_OFFSET_RESET,
+            'enable.auto.commit': False,  # Commits manuales para procesar "at-least-once"
+        }
+        self.consumer = Consumer(consumer_config)
+        self.consumer.subscribe(topics)
+        self.log = log.bind(component="KafkaConsumerClient", topics=topics)
+
+    def consume(self) -> Generator[Any, None, None]:
+        self.log.info("Starting Kafka consumer loop...")
+        try:
+            while True:
+                msg = self.consumer.poll(timeout=1.0)
+                if msg is None:
+                    continue
+                if msg.error():
+                    if msg.error().code() == KafkaError._PARTITION_EOF:
+                        continue
+                    else:
+                        self.log.error("Kafka consumer error", error=msg.error())
+                        raise KafkaException(msg.error())
+                
+                # Mensaje válido recibido, lo entregamos para procesar
+                yield msg
+                
+                # Una vez procesado (fuera de esta función), se hace commit.
+                # Aquí simulamos el commit después de yield
+                self.consumer.commit(asynchronous=True)
+                
+        except KeyboardInterrupt:
+            self.log.info("Consumer loop interrupted by user.")
+        finally:
+            self.close()
+
+    def commit(self, message: Any):
+        """Commits the offset for the given message."""
+        self.consumer.commit(message=message, asynchronous=False)
+
+    def close(self):
+        self.log.info("Closing Kafka consumer...")
+        self.consumer.close()
+```
+
+## File: `app\services\s3_client.py`
+```py
+# File: app/services/s3_client.py
+import boto3
+from botocore.exceptions import ClientError
+import structlog
+from typing import Optional
+
+from app.core.config import settings
+
+log = structlog.get_logger(__name__)
+
+class S3ClientError(Exception):
+    pass
+
+class S3Client:
+    """Synchronous client to interact with Amazon S3."""
+
+    def __init__(self, bucket_name: Optional[str] = None):
+        self.bucket_name = bucket_name or settings.AWS_S3_BUCKET_NAME
+        self.s3_client = boto3.client("s3", region_name=settings.AWS_REGION)
+        self.log = log.bind(s3_bucket=self.bucket_name, aws_region=settings.AWS_REGION)
+
+    def download_file_sync(self, object_name: str, download_path: str):
+        """Downloads a file from S3 to a local path."""
+        self.log.info("Downloading file from S3...", object_name=object_name, target_path=download_path)
+        try:
+            self.s3_client.download_file(self.bucket_name, object_name, download_path)
+            self.log.info("File downloaded successfully from S3.", object_name=object_name)
+        except ClientError as e:
+            if e.response['Error']['Code'] == '404':
+                self.log.error("Object not found in S3", object_name=object_name)
+                raise S3ClientError(f"Object not found in S3: {object_name}") from e
+            else:
+                self.log.error("S3 download failed", error_code=e.response.get("Error", {}).get("Code"), error=str(e))
+                raise S3ClientError(f"S3 error downloading {object_name}") from e
 ```
 
 ## File: `pyproject.toml`
 ```toml
+# File: pyproject.toml
 [tool.poetry]
 name = "docproc-service"
-version = "1.1.0"
-description = "Atenex Document Processing Service: Extracts text and chunks documents."
+version = "2.0.0-refactor"
+description = "Atenex Document Processing Worker (Kafka Consumer/Producer)"
 authors = ["Atenex Team <dev@atenex.com>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.13"
-fastapi = "^0.110.0"
-uvicorn = {extras = ["standard"], version = "^0.28.0"}
-gunicorn = "^21.2.0"
 pydantic = {extras = ["email"], version = "^2.6.4"}
 pydantic-settings = "^2.2.1"
 structlog = "^24.1.0"
-python-multipart = "^0.0.9" # For FastAPI File Uploads
-httpx = "^0.27.0" # For potential internal calls or future use
+httpx = "^0.27.0"
 
-# Extraction Libraries
+# --- AWS and Kafka Clients ---
+boto3 = "^1.34.0"
+confluent-kafka = "^2.4.0"
+
+# --- Extraction Libraries (se mantienen) ---
 pymupdf = "^1.25.0"
 python-docx = ">=1.1.0,<2.0.0"
 markdown = ">=3.5.1,<4.0.0"
 beautifulsoup4 = ">=4.12.3,<5.0.0"
 html2text = ">=2024.1.0,<2025.0.0"
-pandas = "^2.2.0" # Para procesar Excel
-openpyxl = "^3.1.0" # Requerido por pandas para .xlsx
-tabulate = "^0.9.0" # FLAG: Dependencia añadida para el correcto funcionamiento de pandas.to_markdown con tablefmt="pipe"
+pandas = "^2.2.0"
+openpyxl = "^3.1.0"
+tabulate = "^0.9.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.4"

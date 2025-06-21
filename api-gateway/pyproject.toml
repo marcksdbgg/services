@@ -1,9 +1,8 @@
 # File: pyproject.toml
-# api-gateway/pyproject.toml
 [tool.poetry]
 name = "atenex-api-gateway"
-version = "1.1.4" # Incrementar versión para reflejar correcciones
-description = "API Gateway for Atenex Microservices"
+version = "2.0.0-refactor"
+description = "Atenex API Gateway (Simplified Proxy for Kafka/Flink Demo)"
 authors = ["Atenex Team <dev@atenex.com>"]
 readme = "README.md"
 
@@ -19,20 +18,11 @@ gunicorn = "^21.2.0"
 pydantic = {extras = ["email"], version = "^2.6.4"}
 pydantic-settings = "^2.2.1"
 
-# Cliente HTTP asíncrono (versión con extras es la correcta)
+# Cliente HTTP asíncrono
 httpx = {extras = ["http2"], version = "^0.27.0"}
-
-# Manejo de JWT
-python-jose = {extras = ["cryptography"], version = "^3.3.0"}
 
 # Logging estructurado
 structlog = "^24.1.0"
-
-# Cliente PostgreSQL Asíncrono
-asyncpg = "^0.29.0"
-
-# Hashing de Contraseñas
-passlib = {extras = ["bcrypt"], version = "^1.7.4"}
 
 # Dependencia necesaria para httpx[http2]
 h2 = "^4.1.0"
@@ -41,9 +31,6 @@ h2 = "^4.1.0"
 pytest = "^7.4.4"
 pytest-asyncio = "^0.21.1"
 pytest-httpx = "^0.29.0"
-# black = "^24.3.0"
-# ruff = "^0.3.4"
-# mypy = "^1.9.0"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

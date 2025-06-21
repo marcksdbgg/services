@@ -1,163 +1,132 @@
-import time
+# File: app/main.py (Reemplazado)
+import sys
+import os
+import json
 import uuid
+import tempfile
+import pathlib
+import asyncio
 import structlog
-from contextlib import asynccontextmanager
+from typing import Dict, Any
 
-from fastapi import FastAPI, Request, status as fastapi_status
-from fastapi.responses import JSONResponse, PlainTextResponse
-from fastapi.exceptions import RequestValidationError, ResponseValidationError, HTTPException
-
-# Setup logging first
+# Configurar logging primero que nada
 from app.core.logging_config import setup_logging
-setup_logging() # Initialize logging system
+setup_logging()
 
-# Then import other modules that might use logging
 from app.core.config import settings
-from app.api.v1.endpoints import process_endpoint
+from app.services.kafka_clients import KafkaConsumerClient, KafkaProducerClient
+from app.services.s3_client import S3Client, S3ClientError
+from app.application.use_cases.process_document_use_case import ProcessDocumentUseCase
+from app.dependencies import get_process_document_use_case # Reutilizamos el inyector
 
-log = structlog.get_logger(settings.PROJECT_NAME)
+log = structlog.get_logger(__name__)
 
-# --- Lifespan Management ---
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    log.info(f"{settings.PROJECT_NAME} startup sequence initiated...")
-    # Add any async resource initialization here (e.g., DB pools if needed)
-    # For docproc-service, it's mostly stateless or initializes resources per request/use case.
-    log.info(f"{settings.PROJECT_NAME} is ready and running.")
-    yield
-    # Add any async resource cleanup here
-    log.info(f"{settings.PROJECT_NAME} shutdown sequence initiated...")
-    log.info(f"{settings.PROJECT_NAME} shutdown complete.")
+def main():
+    """Punto de entrada principal para el worker de procesamiento de documentos."""
+    log.info("Initializing DocProc Worker...", config=settings.model_dump(exclude=['SUPPORTED_CONTENT_TYPES']))
 
-# --- FastAPI App Instance ---
-app = FastAPI(
-    title=settings.PROJECT_NAME,
-    openapi_url=f"{settings.API_V1_STR}/openapi.json",
-    version="0.1.0",
-    description="Atenex Document Processing Service for text extraction and chunking.",
-    lifespan=lifespan
-)
-
-# --- Middlewares ---
-@app.middleware("http")
-async def add_request_context_timing_logging(request: Request, call_next):
-    start_time = time.perf_counter()
-    request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
-    
-    structlog.contextvars.bind_contextvars(request_id=request_id)
-    # For access in endpoint logs if not using contextvars directly there
-    request.state.request_id = request_id 
-
-    req_log = log.bind(method=request.method, path=request.url.path, client_host=request.client.host if request.client else "unknown")
-    req_log.info("Request received")
-
-    response = None
     try:
-        response = await call_next(request)
-        process_time_ms = (time.perf_counter() - start_time) * 1000
-        
-        resp_log = req_log.bind(status_code=response.status_code, duration_ms=round(process_time_ms, 2))
-        log_level_method = "warning" if 400 <= response.status_code < 500 else "error" if response.status_code >= 500 else "info"
-        getattr(resp_log, log_level_method)("Request finished") # Use getattr to call log method
-
-        response.headers["X-Request-ID"] = request_id
-        response.headers["X-Process-Time-Ms"] = f"{process_time_ms:.2f}"
+        consumer = KafkaConsumerClient(topics=[settings.KAFKA_INPUT_TOPIC])
+        producer = KafkaProducerClient()
+        s3_client = S3Client()
+        use_case: ProcessDocumentUseCase = get_process_document_use_case()
     except Exception as e:
-        process_time_ms = (time.perf_counter() - start_time) * 1000
-        exc_log = req_log.bind(status_code=500, duration_ms=round(process_time_ms, 2)) # Default to 500 for unhandled
-        exc_log.exception("Unhandled exception during request processing") # Logs with traceback
-        
-        response = JSONResponse(
-            status_code=fastapi_status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"detail": "Internal Server Error", "request_id": request_id}
-        )
-        response.headers["X-Request-ID"] = request_id
-        response.headers["X-Process-Time-Ms"] = f"{process_time_ms:.2f}"
+        log.critical("Failed to initialize worker dependencies", error=str(e), exc_info=True)
+        sys.exit(1)
+
+    log.info("Worker initialized successfully. Starting message consumption loop...")
+    
+    try:
+        for msg in consumer.consume():
+            process_message(msg, s3_client, use_case, producer)
+            consumer.commit(message=msg)
+    except KeyboardInterrupt:
+        log.info("Shutdown signal received.")
+    except Exception as e:
+        log.critical("Critical error in consumer loop. Exiting.", error=str(e), exc_info=True)
     finally:
-         structlog.contextvars.clear_contextvars()
-    return response
+        log.info("Closing worker resources...")
+        consumer.close()
+        producer.flush()
+        log.info("Worker shut down gracefully.")
 
 
-# --- Exception Handlers ---
-@app.exception_handler(HTTPException)
-async def custom_http_exception_handler(request: Request, exc: HTTPException):
-    request_id = getattr(request.state, 'request_id', 'N/A')
-    log_method = log.warning if exc.status_code < 500 else log.error
-    log_method(
-        "HTTP Exception caught", 
-        status_code=exc.status_code, 
-        detail=exc.detail,
-        request_id=request_id
-    )
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"detail": exc.detail, "request_id": request_id},
-        headers=getattr(exc, "headers", None),
-    )
+def process_message(msg, s3_client: S3Client, use_case: ProcessDocumentUseCase, producer: KafkaProducerClient):
+    """Procesa un único mensaje de Kafka."""
+    try:
+        event_data = json.loads(msg.value().decode('utf-8'))
+        log_context = {
+            "kafka_topic": msg.topic(),
+            "kafka_partition": msg.partition(),
+            "kafka_offset": msg.offset(),
+            "document_id": event_data.get("document_id"),
+            "company_id": event_data.get("company_id"),
+        }
+        msg_log = log.bind(**log_context)
+        msg_log.info("Received new message to process.")
 
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    request_id = getattr(request.state, 'request_id', 'N/A')
-    log.warning("Request Validation Error", errors=exc.errors(), path=request.url.path, request_id=request_id)
-    return JSONResponse(
-        status_code=fastapi_status.HTTP_422_UNPROCESSABLE_ENTITY,
-        content={"detail": "Validation Error", "errors": exc.errors(), "request_id": request_id},
-    )
+        s3_path = event_data.get("s3_path")
+        document_id = event_data.get("document_id")
+        content_type = guess_content_type(s3_path) # Inferir de la ruta/nombre de archivo
 
-@app.exception_handler(ResponseValidationError)
-async def response_validation_error_handler(request: Request, exc: ResponseValidationError):
-    request_id = getattr(request.state, 'request_id', 'N/A')
-    log.error("Response Validation Error", errors=exc.errors(), path=request.url.path, request_id=request_id, exc_info=True)
-    return JSONResponse(
-        status_code=fastapi_status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"detail": "Internal Error: Response validation failed", "errors": exc.errors(), "request_id": request_id},
-    )
+        if not all([s3_path, document_id, content_type]):
+            msg_log.error("Message is missing required fields: s3_path, document_id, or content_type cannot be inferred.")
+            return
 
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    request_id = getattr(request.state, 'request_id', 'N/A')
-    log.exception("Unhandled global exception caught", path=request.url.path, request_id=request_id) # Ensures full traceback
-    return JSONResponse(
-        status_code=fastapi_status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"detail": "An unexpected internal server error occurred.", "request_id": request_id}
-    )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            local_path = pathlib.Path(temp_dir) / os.path.basename(s3_path)
+            s3_client.download_file_sync(s3_path, str(local_path))
+            file_bytes = local_path.read_bytes()
 
-# --- API Router Inclusion ---
-app.include_router(process_endpoint.router, prefix=settings.API_V1_STR, tags=["Document Processing"])
-log.info(f"Included processing router with prefix: {settings.API_V1_STR}")
+        msg_log.info("File downloaded from S3, proceeding with processing.", file_size=len(file_bytes))
+        
+        # Ejecutar el caso de uso asíncrono
+        process_response_data = asyncio.run(use_case.execute(
+            file_bytes=file_bytes,
+            original_filename=os.path.basename(s3_path),
+            content_type=content_type,
+            document_id_trace=document_id
+        ))
+
+        # Producir un mensaje por cada chunk
+        chunks = process_response_data.chunks
+        msg_log.info(f"Document processed. Found {len(chunks)} chunks to produce.")
+        
+        for i, chunk in enumerate(chunks):
+            chunk_id = str(uuid.uuid4())
+            page_number = chunk.source_metadata.page_number
+            
+            output_payload = {
+                "chunk_id": chunk_id,
+                "document_id": document_id,
+                "text": chunk.text,
+                "page": page_number if page_number is not None else -1
+            }
+            producer.produce(
+                topic=settings.KAFKA_OUTPUT_TOPIC,
+                key=document_id, # Particionar por document_id para mantener el orden de los chunks
+                value=output_payload
+            )
+
+        msg_log.info("All chunks produced to output topic.", num_chunks=len(chunks))
+
+    except json.JSONDecodeError:
+        log.error("Failed to decode Kafka message value", raw_value=msg.value())
+    except S3ClientError as e:
+        log.error("Failed to process message due to S3 error", error=str(e), exc_info=True)
+    except Exception as e:
+        log.error("Unhandled error processing message", error=str(e), exc_info=True)
 
 
-# --- Health Check Endpoint ---
-@app.get(
-    "/health",
-    tags=["Health Check"],
-    summary="Performs a health check of the service.",
-    response_description="Returns the health status of the service.",
-    status_code=fastapi_status.HTTP_200_OK,
-)
-async def health_check():
-    log.debug("Health check endpoint called")
-    return {
-        "status": "ok",
-        "service": settings.PROJECT_NAME,
-        "version": app.version # FastAPI app version
-    }
+def guess_content_type(filename: str) -> Optional[str]:
+    """Intenta adivinar el content-type a partir de la extensión del archivo."""
+    import mimetypes
+    content_type, _ = mimetypes.guess_type(filename)
+    if content_type is None:
+        if filename.lower().endswith('.md'):
+            return 'text/markdown'
+    return content_type
 
-# --- Root Endpoint ---
-@app.get("/", include_in_schema=False)
-async def root():
-    return PlainTextResponse(f"{settings.PROJECT_NAME} is running.")
 
 if __name__ == "__main__":
-    import uvicorn
-    log.info(f"Starting {settings.PROJECT_NAME} locally on port {settings.PORT}")
-    uvicorn.run(
-        "app.main:app",
-        host="0.0.0.0",
-        port=settings.PORT,
-        log_level=settings.LOG_LEVEL.lower(),
-        reload=True # Enable reload for local development
-    )
-
-# === 0.1.0 ===
-# - jfu 2
+    main()
