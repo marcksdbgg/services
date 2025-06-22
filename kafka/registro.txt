@@ -1,0 +1,21 @@
+En este registro se detalla 
+
+
+Terminal 1: Zookeeper
+
+/opt/kafka/bin/zookeeper-server-start.sh /opt/kafka/config/zookeeper.properties
+
+Terminal 2: kafka Broker
+
+/opt/kafka/bin/kafka-server-start.sh /opt/kafka/config/server.properties
+
+Crear topics:
+
+/opt/kafka/bin/kafka-topics.sh --create --topic documents.raw --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1
+/opt/kafka/bin/kafka-topics.sh --create --topic chunks.processed --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1
+/opt/kafka/bin/kafka-topics.sh --create --topic embeddings.ready --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1
+
+Verificar su existencia:
+
+/opt/kafka/bin/kafka-topics.sh --list --bootstrap-server localhost:9092
+
