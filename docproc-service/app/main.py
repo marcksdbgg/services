@@ -1,4 +1,4 @@
-# File: app/main.py (Reemplazado)
+# File: docproc-service/app/main.py
 import sys
 import os
 import json
@@ -7,9 +7,11 @@ import tempfile
 import pathlib
 import asyncio
 import structlog
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
-# Configurar logging primero que nada
+from dotenv import load_dotenv
+load_dotenv()
+
 from app.core.logging_config import setup_logging
 setup_logging()
 
@@ -17,7 +19,7 @@ from app.core.config import settings
 from app.services.kafka_clients import KafkaConsumerClient, KafkaProducerClient
 from app.services.s3_client import S3Client, S3ClientError
 from app.application.use_cases.process_document_use_case import ProcessDocumentUseCase
-from app.dependencies import get_process_document_use_case # Reutilizamos el inyector
+from app.dependencies import get_process_document_use_case
 
 log = structlog.get_logger(__name__)
 
@@ -67,10 +69,11 @@ def process_message(msg, s3_client: S3Client, use_case: ProcessDocumentUseCase, 
 
         s3_path = event_data.get("s3_path")
         document_id = event_data.get("document_id")
-        content_type = guess_content_type(s3_path) # Inferir de la ruta/nombre de archivo
+        company_id = event_data.get("company_id") # <-- CORRECCIÓN: Capturar company_id
+        content_type = guess_content_type(s3_path)
 
-        if not all([s3_path, document_id, content_type]):
-            msg_log.error("Message is missing required fields: s3_path, document_id, or content_type cannot be inferred.")
+        if not all([s3_path, document_id, content_type, company_id]):
+            msg_log.error("Message is missing required fields.", missing_fields=[k for k,v in {'s3_path':s3_path, 'document_id':document_id, 'company_id':company_id, 'content_type':content_type}.items() if not v])
             return
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -80,15 +83,14 @@ def process_message(msg, s3_client: S3Client, use_case: ProcessDocumentUseCase, 
 
         msg_log.info("File downloaded from S3, proceeding with processing.", file_size=len(file_bytes))
         
-        # Ejecutar el caso de uso asíncrono
         process_response_data = asyncio.run(use_case.execute(
             file_bytes=file_bytes,
             original_filename=os.path.basename(s3_path),
             content_type=content_type,
-            document_id_trace=document_id
+            document_id_trace=document_id,
+            company_id_trace=company_id # <-- CORRECCIÓN: Pasar company_id al caso de uso
         ))
 
-        # Producir un mensaje por cada chunk
         chunks = process_response_data.chunks
         msg_log.info(f"Document processed. Found {len(chunks)} chunks to produce.")
         
@@ -99,12 +101,13 @@ def process_message(msg, s3_client: S3Client, use_case: ProcessDocumentUseCase, 
             output_payload = {
                 "chunk_id": chunk_id,
                 "document_id": document_id,
+                "company_id": company_id, # <-- CORRECCIÓN: Incluir company_id en el payload de salida
                 "text": chunk.text,
                 "page": page_number if page_number is not None else -1
             }
             producer.produce(
                 topic=settings.KAFKA_OUTPUT_TOPIC,
-                key=document_id, # Particionar por document_id para mantener el orden de los chunks
+                key=document_id,
                 value=output_payload
             )
 

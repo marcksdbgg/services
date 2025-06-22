@@ -1,10 +1,11 @@
 # File: pyproject.toml
 [tool.poetry]
 name = "docproc-service"
-version = "2.0.0-refactor"
+version = "2.0.0"
 description = "Atenex Document Processing Worker (Kafka Consumer/Producer)"
 authors = ["Atenex Team <dev@atenex.com>"]
 readme = "README.md"
+package-mode = false
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.13"

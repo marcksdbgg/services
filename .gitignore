@@ -1,0 +1,4 @@
+
+# Ignorar todos los __pycache__ en cualquier subcarpeta de app de los microservicios
+**/app/**/__pycache__/
+**/app/**/__pycache__/*

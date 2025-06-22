@@ -1,4 +1,4 @@
-# embedding-service/app/infrastructure/embedding_models/openai_adapter.py
+# File: embedding-service/app/infrastructure/embedding_models/openai_adapter.py
 import structlog
 from typing import List, Tuple, Dict, Any, Optional
 import asyncio
@@ -53,12 +53,8 @@ class OpenAIAdapter(EmbeddingModelPort):
                 api_key=settings.OPENAI_API_KEY.get_secret_value(),
                 base_url=settings.OPENAI_API_BASE,
                 timeout=settings.OPENAI_TIMEOUT_SECONDS,
-                max_retries=0 # We use tenacity for retries in embed_texts
+                max_retries=0
             )
-
-            # Optional: Perform a lightweight test call to verify API key and connectivity
-            # For example, listing models (can be slow, consider if truly needed for health)
-            # await self._client.models.list(limit=1)
 
             self._model_initialized = True
             self._initialization_error = None
@@ -67,7 +63,7 @@ class OpenAIAdapter(EmbeddingModelPort):
 
         except AuthenticationError as e:
             self._initialization_error = f"OpenAI API Authentication Failed: {e}. Check your API key."
-            init_log.critical(self._initialization_error, exc_info=False) # exc_info=False for auth errors usually
+            init_log.critical(self._initialization_error, exc_info=False)
             self._client = None
             self._model_initialized = False
             raise ConnectionError(self._initialization_error) from e
@@ -85,9 +81,9 @@ class OpenAIAdapter(EmbeddingModelPort):
             raise ConnectionError(self._initialization_error) from e
 
     @retry(
-        stop=stop_after_attempt(settings.OPENAI_MAX_RETRIES + 1), # settings.OPENAI_MAX_RETRIES are retries, so +1 for initial attempt
+        stop=stop_after_attempt(settings.OPENAI_MAX_RETRIES + 1),
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type((APIConnectionError, RateLimitError, OpenAIError)), # Add other retryable OpenAI errors if needed
+        retry=retry_if_exception_type((APIConnectionError, RateLimitError, OpenAIError)),
         before_sleep=lambda retry_state: log.warning(
             "Retrying OpenAI embedding call",
             model_name=settings.OPENAI_EMBEDDING_MODEL_NAME,
@@ -108,7 +104,7 @@ class OpenAIAdapter(EmbeddingModelPort):
         embed_log.debug("Generating embeddings via OpenAI API...")
 
         try:
-            api_params = {
+            api_params: Dict[str, Any] = {
                 "model": self._model_name,
                 "input": texts,
                 "encoding_format": "float"
@@ -116,13 +112,12 @@ class OpenAIAdapter(EmbeddingModelPort):
             if self._dimensions_override is not None:
                 api_params["dimensions"] = self._dimensions_override
 
-            response = await self._client.embeddings.create(**api_params) # type: ignore
+            response = await self._client.embeddings.create(**api_params)
 
             if not response.data or not all(item.embedding for item in response.data):
                 embed_log.error("OpenAI API returned no embedding data or empty embeddings.", api_response=response.model_dump_json(indent=2))
                 raise ValueError("OpenAI API returned no valid embedding data.")
 
-            # Verify dimensions of the first embedding as a sanity check
             if response.data and response.data[0].embedding:
                 actual_dim = len(response.data[0].embedding)
                 if actual_dim != self._embedding_dimension:
@@ -132,23 +127,20 @@ class OpenAIAdapter(EmbeddingModelPort):
                         actual_dim=actual_dim,
                         model_used=response.model
                     )
-                    # This indicates a potential configuration issue or unexpected API change.
-                    # Depending on strictness, could raise an error or just log.
-                    # For now, we'll trust the configured EMBEDDING_DIMENSION.
 
             embeddings_list = [item.embedding for item in response.data]
             embed_log.debug("Embeddings generated successfully via OpenAI.", num_embeddings=len(embeddings_list), usage_tokens=response.usage.total_tokens if response.usage else "N/A")
             return embeddings_list
         except AuthenticationError as e:
             embed_log.error("OpenAI API Authentication Error during embedding", error=str(e))
-            raise ConnectionError(f"OpenAI authentication failed: {e}") from e # Propagate as ConnectionError to be caught by endpoint
+            raise ConnectionError(f"OpenAI authentication failed: {e}") from e
         except RateLimitError as e:
             embed_log.error("OpenAI API Rate Limit Exceeded during embedding", error=str(e))
-            raise OpenAIError(f"OpenAI rate limit exceeded: {e}") from e # Let tenacity handle retry
+            raise OpenAIError(f"OpenAI rate limit exceeded: {e}") from e
         except APIConnectionError as e:
             embed_log.error("OpenAI API Connection Error during embedding", error=str(e))
-            raise OpenAIError(f"OpenAI connection error: {e}") from e # Let tenacity handle retry
-        except OpenAIError as e: # Catch other OpenAI specific errors
+            raise OpenAIError(f"OpenAI connection error: {e}") from e
+        except OpenAIError as e:
             embed_log.error(f"OpenAI API Error during embedding: {type(e).__name__}", error=str(e))
             raise RuntimeError(f"OpenAI API error: {e}") from e
         except Exception as e:
@@ -158,15 +150,11 @@ class OpenAIAdapter(EmbeddingModelPort):
     def get_model_info(self) -> Dict[str, Any]:
         return {
             "model_name": self._model_name,
-            "dimension": self._embedding_dimension, # This is the validated, final dimension
+            "dimension": self._embedding_dimension,
         }
 
     async def health_check(self) -> Tuple[bool, str]:
         if self._model_initialized and self._client:
-            # A more robust health check could involve a lightweight API call,
-            # but be mindful of cost and rate limits for frequent health checks.
-            # For now, if client is initialized, we assume basic health.
-            # A true test is done during initialize_model or first embedding call.
             return True, f"OpenAI client initialized for model {self._model_name}."
         elif self._initialization_error:
             return False, f"OpenAI client initialization failed: {self._initialization_error}"

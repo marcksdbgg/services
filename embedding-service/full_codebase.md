@@ -3,6 +3,10 @@
 ```
 app/
 ├── __init__.py
+├── api
+│   └── v1
+│       ├── __init__.py
+│       └── schemas.py
 ├── application
 │   ├── __init__.py
 │   ├── ports
@@ -32,17 +36,35 @@ app/
 
 # Codebase del Microservicio embedding-service: `app`
 
-## File: `app\__init__.py`
+## File: `app/__init__.py`
 ```py
 
 ```
 
-## File: `app\application\__init__.py`
+## File: `app/api/v1/__init__.py`
 ```py
 
 ```
 
-## File: `app\application\ports\__init__.py`
+## File: `app/api/v1/schemas.py`
+```py
+from typing import Optional
+from pydantic import BaseModel
+
+class ModelInfo(BaseModel):
+    name: str
+    version: Optional[str] = None
+    description: Optional[str] = None
+    provider: Optional[str] = None
+
+```
+
+## File: `app/application/__init__.py`
+```py
+
+```
+
+## File: `app/application/ports/__init__.py`
 ```py
 # embedding-service/app/application/ports/__init__.py
 from .embedding_model_port import EmbeddingModelPort
@@ -50,7 +72,7 @@ from .embedding_model_port import EmbeddingModelPort
 __all__ = ["EmbeddingModelPort"]
 ```
 
-## File: `app\application\ports\embedding_model_port.py`
+## File: `app/application/ports/embedding_model_port.py`
 ```py
 # embedding-service/app/application/ports/embedding_model_port.py
 import abc
@@ -98,12 +120,12 @@ class EmbeddingModelPort(abc.ABC):
         raise NotImplementedError
 ```
 
-## File: `app\application\use_cases\__init__.py`
+## File: `app/application/use_cases/__init__.py`
 ```py
 
 ```
 
-## File: `app\application\use_cases\embed_texts_use_case.py`
+## File: `app/application/use_cases/embed_texts_use_case.py`
 ```py
 # embedding-service/app/application/use_cases/embed_texts_use_case.py
 import structlog
@@ -161,12 +183,12 @@ class EmbedTextsUseCase:
             raise
 ```
 
-## File: `app\core\__init__.py`
+## File: `app/core/__init__.py`
 ```py
 
 ```
 
-## File: `app\core\config.py`
+## File: `app/core/config.py`
 ```py
 # File: embedding-service/app/core/config.py
 import sys
@@ -193,7 +215,9 @@ class Settings(BaseSettings):
     EMBEDDING_DIMENSION: int = 1536
     OPENAI_TIMEOUT_SECONDS: int = 30
     OPENAI_MAX_RETRIES: int = 3
-    
+    OPENAI_API_BASE: Optional[str] = Field(default=None, description="Optional override for the OpenAI API base URL.")
+    OPENAI_EMBEDDING_DIMENSIONS_OVERRIDE: Optional[int] = Field(default=None, description="Optional override for embedding dimensions (for newer OpenAI models).")
+
     # --- Kafka ---
     KAFKA_BOOTSTRAP_SERVERS: str = Field(description="Comma-separated list of Kafka bootstrap servers.")
     KAFKA_CONSUMER_GROUP_ID: str = Field(default="embedding_workers", description="Kafka consumer group ID.")
@@ -229,7 +253,7 @@ except Exception as e:
     sys.exit("FATAL: Invalid configuration. Check logs.")
 ```
 
-## File: `app\core\logging_config.py`
+## File: `app/core/logging_config.py`
 ```py
 # embedding-service/app/core/logging_config.py
 import logging
@@ -294,13 +318,13 @@ def setup_logging():
     log.info("Logging configured for Embedding Service", log_level=settings.LOG_LEVEL)
 ```
 
-## File: `app\domain\__init__.py`
+## File: `app/domain/__init__.py`
 ```py
 # Domain package for embedding-service
 
 ```
 
-## File: `app\domain\models.py`
+## File: `app/domain/models.py`
 ```py
 # embedding-service/app/domain/models.py
 from pydantic import BaseModel, Field
@@ -316,19 +340,19 @@ from typing import List, Dict, Any, Optional
 #     source_text_preview: str # For context
 ```
 
-## File: `app\infrastructure\__init__.py`
+## File: `app/infrastructure/__init__.py`
 ```py
 # Infrastructure package for embedding-service
 
 ```
 
-## File: `app\infrastructure\embedding_models\__init__.py`
+## File: `app/infrastructure/embedding_models/__init__.py`
 ```py
 # Models subpackage for infrastructure
 
 ```
 
-## File: `app\infrastructure\embedding_models\fastembed_adapter.py`
+## File: `app/infrastructure/embedding_models/fastembed_adapter.py`
 ```py
 # embedding-service/app/infrastructure/embedding_models/fastembed_adapter.py
 import structlog
@@ -468,9 +492,9 @@ class FastEmbedAdapter(EmbeddingModelPort):
             return False, f"FastEmbed model '{self._model_name}' not loaded."
 ```
 
-## File: `app\infrastructure\embedding_models\openai_adapter.py`
+## File: `app/infrastructure/embedding_models/openai_adapter.py`
 ```py
-# embedding-service/app/infrastructure/embedding_models/openai_adapter.py
+# File: embedding-service/app/infrastructure/embedding_models/openai_adapter.py
 import structlog
 from typing import List, Tuple, Dict, Any, Optional
 import asyncio
@@ -525,12 +549,8 @@ class OpenAIAdapter(EmbeddingModelPort):
                 api_key=settings.OPENAI_API_KEY.get_secret_value(),
                 base_url=settings.OPENAI_API_BASE,
                 timeout=settings.OPENAI_TIMEOUT_SECONDS,
-                max_retries=0 # We use tenacity for retries in embed_texts
+                max_retries=0
             )
-
-            # Optional: Perform a lightweight test call to verify API key and connectivity
-            # For example, listing models (can be slow, consider if truly needed for health)
-            # await self._client.models.list(limit=1)
 
             self._model_initialized = True
             self._initialization_error = None
@@ -539,7 +559,7 @@ class OpenAIAdapter(EmbeddingModelPort):
 
         except AuthenticationError as e:
             self._initialization_error = f"OpenAI API Authentication Failed: {e}. Check your API key."
-            init_log.critical(self._initialization_error, exc_info=False) # exc_info=False for auth errors usually
+            init_log.critical(self._initialization_error, exc_info=False)
             self._client = None
             self._model_initialized = False
             raise ConnectionError(self._initialization_error) from e
@@ -557,9 +577,9 @@ class OpenAIAdapter(EmbeddingModelPort):
             raise ConnectionError(self._initialization_error) from e
 
     @retry(
-        stop=stop_after_attempt(settings.OPENAI_MAX_RETRIES + 1), # settings.OPENAI_MAX_RETRIES are retries, so +1 for initial attempt
+        stop=stop_after_attempt(settings.OPENAI_MAX_RETRIES + 1),
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type((APIConnectionError, RateLimitError, OpenAIError)), # Add other retryable OpenAI errors if needed
+        retry=retry_if_exception_type((APIConnectionError, RateLimitError, OpenAIError)),
         before_sleep=lambda retry_state: log.warning(
             "Retrying OpenAI embedding call",
             model_name=settings.OPENAI_EMBEDDING_MODEL_NAME,
@@ -580,7 +600,7 @@ class OpenAIAdapter(EmbeddingModelPort):
         embed_log.debug("Generating embeddings via OpenAI API...")
 
         try:
-            api_params = {
+            api_params: Dict[str, Any] = {
                 "model": self._model_name,
                 "input": texts,
                 "encoding_format": "float"
@@ -588,13 +608,12 @@ class OpenAIAdapter(EmbeddingModelPort):
             if self._dimensions_override is not None:
                 api_params["dimensions"] = self._dimensions_override
 
-            response = await self._client.embeddings.create(**api_params) # type: ignore
+            response = await self._client.embeddings.create(**api_params)
 
             if not response.data or not all(item.embedding for item in response.data):
                 embed_log.error("OpenAI API returned no embedding data or empty embeddings.", api_response=response.model_dump_json(indent=2))
                 raise ValueError("OpenAI API returned no valid embedding data.")
 
-            # Verify dimensions of the first embedding as a sanity check
             if response.data and response.data[0].embedding:
                 actual_dim = len(response.data[0].embedding)
                 if actual_dim != self._embedding_dimension:
@@ -604,23 +623,20 @@ class OpenAIAdapter(EmbeddingModelPort):
                         actual_dim=actual_dim,
                         model_used=response.model
                     )
-                    # This indicates a potential configuration issue or unexpected API change.
-                    # Depending on strictness, could raise an error or just log.
-                    # For now, we'll trust the configured EMBEDDING_DIMENSION.
 
             embeddings_list = [item.embedding for item in response.data]
             embed_log.debug("Embeddings generated successfully via OpenAI.", num_embeddings=len(embeddings_list), usage_tokens=response.usage.total_tokens if response.usage else "N/A")
             return embeddings_list
         except AuthenticationError as e:
             embed_log.error("OpenAI API Authentication Error during embedding", error=str(e))
-            raise ConnectionError(f"OpenAI authentication failed: {e}") from e # Propagate as ConnectionError to be caught by endpoint
+            raise ConnectionError(f"OpenAI authentication failed: {e}") from e
         except RateLimitError as e:
             embed_log.error("OpenAI API Rate Limit Exceeded during embedding", error=str(e))
-            raise OpenAIError(f"OpenAI rate limit exceeded: {e}") from e # Let tenacity handle retry
+            raise OpenAIError(f"OpenAI rate limit exceeded: {e}") from e
         except APIConnectionError as e:
             embed_log.error("OpenAI API Connection Error during embedding", error=str(e))
-            raise OpenAIError(f"OpenAI connection error: {e}") from e # Let tenacity handle retry
-        except OpenAIError as e: # Catch other OpenAI specific errors
+            raise OpenAIError(f"OpenAI connection error: {e}") from e
+        except OpenAIError as e:
             embed_log.error(f"OpenAI API Error during embedding: {type(e).__name__}", error=str(e))
             raise RuntimeError(f"OpenAI API error: {e}") from e
         except Exception as e:
@@ -630,15 +646,11 @@ class OpenAIAdapter(EmbeddingModelPort):
     def get_model_info(self) -> Dict[str, Any]:
         return {
             "model_name": self._model_name,
-            "dimension": self._embedding_dimension, # This is the validated, final dimension
+            "dimension": self._embedding_dimension,
         }
 
     async def health_check(self) -> Tuple[bool, str]:
         if self._model_initialized and self._client:
-            # A more robust health check could involve a lightweight API call,
-            # but be mindful of cost and rate limits for frequent health checks.
-            # For now, if client is initialized, we assume basic health.
-            # A true test is done during initialize_model or first embedding call.
             return True, f"OpenAI client initialized for model {self._model_name}."
         elif self._initialization_error:
             return False, f"OpenAI client initialization failed: {self._initialization_error}"
@@ -646,14 +658,14 @@ class OpenAIAdapter(EmbeddingModelPort):
             return False, "OpenAI client not initialized."
 ```
 
-## File: `app\main.py`
+## File: `app/main.py`
 ```py
 # File: embedding-service/app/main.py
 import sys
 import json
 import asyncio
 import structlog
-from typing import Any, List, Generator
+from typing import Any, List, Generator, Dict
 
 # Configurar logging primero que nada
 from app.core.logging_config import setup_logging
@@ -717,16 +729,16 @@ def process_message_batch(message_batch: List[Any], use_case: EmbedTextsUseCase,
     for msg in message_batch:
         try:
             event_data = json.loads(msg.value().decode('utf-8'))
-            if text := event_data.get("text"):
-                texts_to_embed.append(text)
-                metadata_list.append({k: v for k, v in event_data.items() if k != "text"})
+            if "text" in event_data and event_data["text"] is not None:
+                texts_to_embed.append(event_data["text"])
+                metadata_list.append(event_data)
             else:
-                batch_log.warning("Skipping message with missing 'text' field", offset=msg.offset())
+                batch_log.warning("Skipping message with missing or null 'text' field", offset=msg.offset())
         except json.JSONDecodeError:
             batch_log.error("Failed to decode Kafka message", offset=msg.offset())
 
     if not texts_to_embed:
-        batch_log.warning("No valid texts to embed in this batch.")
+        batch_log.debug("No valid texts to embed in this batch.")
         return
 
     try:
@@ -737,26 +749,28 @@ def process_message_batch(message_batch: List[Any], use_case: EmbedTextsUseCase,
 
         for i, vector in enumerate(embeddings):
             meta = metadata_list[i]
-            # Se propaga el company_id para que Flink pueda usarlo
             output_payload = {
                 "chunk_id": meta.get("chunk_id"),
                 "document_id": meta.get("document_id"),
                 "company_id": meta.get("company_id"), 
                 "vector": vector,
             }
-            producer.produce(settings.KAFKA_OUTPUT_TOPIC, key=meta.get("document_id"), value=output_payload)
+            producer.produce(settings.KAFKA_OUTPUT_TOPIC, key=str(meta.get("document_id")), value=output_payload)
         
         batch_log.info(f"Processed and produced {len(embeddings)} embeddings.")
     except Exception as e:
         batch_log.error("Unhandled error processing batch", error=str(e), exc_info=True)
+
+if __name__ == "__main__":
+    main()
 ```
 
-## File: `app\services\__init__.py`
+## File: `app/services/__init__.py`
 ```py
 
 ```
 
-## File: `app\services\kafka_clients.py`
+## File: `app/services/kafka_clients.py`
 ```py
 # File: app/services/kafka_clients.py
 import json
@@ -847,10 +861,11 @@ class KafkaConsumerClient:
 # File: embedding-service/pyproject.toml
 [tool.poetry]
 name = "embedding-service"
-version = "2.1.0-final"
+version = "2.1.0"
 description = "Atenex Embedding Worker using OpenAI (Kafka Consumer/Producer)"
 authors = ["Atenex Team <dev@atenex.com>"]
 readme = "README.md"
+package-mode = false
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.13"

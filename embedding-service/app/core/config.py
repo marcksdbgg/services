@@ -23,7 +23,9 @@ class Settings(BaseSettings):
     EMBEDDING_DIMENSION: int = 1536
     OPENAI_TIMEOUT_SECONDS: int = 30
     OPENAI_MAX_RETRIES: int = 3
-    
+    OPENAI_API_BASE: Optional[str] = Field(default=None, description="Optional override for the OpenAI API base URL.")
+    OPENAI_EMBEDDING_DIMENSIONS_OVERRIDE: Optional[int] = Field(default=None, description="Optional override for embedding dimensions (for newer OpenAI models).")
+
     # --- Kafka ---
     KAFKA_BOOTSTRAP_SERVERS: str = Field(description="Comma-separated list of Kafka bootstrap servers.")
     KAFKA_CONSUMER_GROUP_ID: str = Field(default="embedding_workers", description="Kafka consumer group ID.")

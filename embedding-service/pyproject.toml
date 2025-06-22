@@ -1,10 +1,11 @@
 # File: embedding-service/pyproject.toml
 [tool.poetry]
 name = "embedding-service"
-version = "2.1.0-final"
+version = "2.1.0"
 description = "Atenex Embedding Worker using OpenAI (Kafka Consumer/Producer)"
 authors = ["Atenex Team <dev@atenex.com>"]
 readme = "README.md"
+package-mode = false
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.13"

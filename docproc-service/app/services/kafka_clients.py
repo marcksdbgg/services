@@ -48,7 +48,7 @@ class KafkaConsumerClient:
             'bootstrap.servers': settings.KAFKA_BOOTSTRAP_SERVERS,
             'group.id': settings.KAFKA_CONSUMER_GROUP_ID,
             'auto.offset.reset': settings.KAFKA_AUTO_OFFSET_RESET,
-            'enable.auto.commit': False,  # Commits manuales para procesar "at-least-once"
+            'enable.auto.commit': False,
         }
         self.consumer = Consumer(consumer_config)
         self.consumer.subscribe(topics)
@@ -68,12 +68,7 @@ class KafkaConsumerClient:
                         self.log.error("Kafka consumer error", error=msg.error())
                         raise KafkaException(msg.error())
                 
-                # Mensaje válido recibido, lo entregamos para procesar
                 yield msg
-                
-                # Una vez procesado (fuera de esta función), se hace commit.
-                # Aquí simulamos el commit después de yield
-                self.consumer.commit(asynchronous=True)
                 
         except KeyboardInterrupt:
             self.log.info("Consumer loop interrupted by user.")

@@ -3,7 +3,7 @@ import sys
 import json
 import asyncio
 import structlog
-from typing import Any, List, Generator
+from typing import Any, List, Generator, Dict
 
 # Configurar logging primero que nada
 from app.core.logging_config import setup_logging
@@ -67,16 +67,16 @@ def process_message_batch(message_batch: List[Any], use_case: EmbedTextsUseCase,
     for msg in message_batch:
         try:
             event_data = json.loads(msg.value().decode('utf-8'))
-            if text := event_data.get("text"):
-                texts_to_embed.append(text)
-                metadata_list.append({k: v for k, v in event_data.items() if k != "text"})
+            if "text" in event_data and event_data["text"] is not None:
+                texts_to_embed.append(event_data["text"])
+                metadata_list.append(event_data)
             else:
-                batch_log.warning("Skipping message with missing 'text' field", offset=msg.offset())
+                batch_log.warning("Skipping message with missing or null 'text' field", offset=msg.offset())
         except json.JSONDecodeError:
             batch_log.error("Failed to decode Kafka message", offset=msg.offset())
 
     if not texts_to_embed:
-        batch_log.warning("No valid texts to embed in this batch.")
+        batch_log.debug("No valid texts to embed in this batch.")
         return
 
     try:
@@ -87,15 +87,17 @@ def process_message_batch(message_batch: List[Any], use_case: EmbedTextsUseCase,
 
         for i, vector in enumerate(embeddings):
             meta = metadata_list[i]
-            # Se propaga el company_id para que Flink pueda usarlo
             output_payload = {
                 "chunk_id": meta.get("chunk_id"),
                 "document_id": meta.get("document_id"),
                 "company_id": meta.get("company_id"), 
                 "vector": vector,
             }
-            producer.produce(settings.KAFKA_OUTPUT_TOPIC, key=meta.get("document_id"), value=output_payload)
+            producer.produce(settings.KAFKA_OUTPUT_TOPIC, key=str(meta.get("document_id")), value=output_payload)
         
         batch_log.info(f"Processed and produced {len(embeddings)} embeddings.")
     except Exception as e:
         batch_log.error("Unhandled error processing batch", error=str(e), exc_info=True)
+
+if __name__ == "__main__":
+    main()

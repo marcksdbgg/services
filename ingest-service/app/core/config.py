@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     )
 
     PROJECT_NAME: str = "Atenex Ingest Service (Kafka Producer, DB-less)"
-    API_V1_STR: str = "/api/v1/ingest"
+    API_V1_STR: str = "/api/v1"
     LOG_LEVEL: str = "INFO"
 
     # --- AWS S3 ---
@@ -26,7 +26,8 @@ class Settings(BaseSettings):
     KAFKA_BOOTSTRAP_SERVERS: str = Field(description="Comma-separated list of Kafka bootstrap servers.")
     KAFKA_DOCUMENTS_RAW_TOPIC: str = Field(default="documents.raw", description="Kafka topic for new raw documents.")
     KAFKA_PRODUCER_ACKS: str = "all"
-    
+    KAFKA_PRODUCER_LINGER_MS: int = 10
+
     SUPPORTED_CONTENT_TYPES: List[str] = [
         "application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "application/msword", "text/plain", "text/markdown", "text/html",

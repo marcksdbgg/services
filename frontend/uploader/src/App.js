@@ -21,11 +21,13 @@ function App() {
 
   const { getRootProps, getInputProps, isDragActive, isDragReject } = useDropzone({
     onDrop,
+    // Tipos permitidos: PDF, DOCX, TXT, HTML, Markdown
     accept: {
       'application/pdf': ['.pdf'],
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
       'text/plain': ['.txt'],
       'text/markdown': ['.md'],
+      'text/html': ['.html', '.htm'],
     },
   });
 

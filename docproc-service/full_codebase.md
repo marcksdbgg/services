@@ -16,6 +16,7 @@ app/
 │   ├── __init__.py
 │   ├── config.py
 │   └── logging_config.py
+├── dependencies.py
 ├── domain
 │   ├── __init__.py
 │   └── models.py
@@ -27,6 +28,7 @@ app/
 │   └── extractors
 │       ├── __init__.py
 │       ├── base_extractor.py
+│       ├── composite_extractor_adapter.py
 │       ├── docx_adapter.py
 │       ├── excel_adapter.py
 │       ├── html_adapter.py
@@ -42,22 +44,22 @@ app/
 
 # Codebase del Microservicio docproc-service: `app`
 
-## File: `app\__init__.py`
+## File: `app/__init__.py`
 ```py
 
 ```
 
-## File: `app\application\__init__.py`
+## File: `app/application/__init__.py`
 ```py
 
 ```
 
-## File: `app\application\ports\__init__.py`
+## File: `app/application/ports/__init__.py`
 ```py
 
 ```
 
-## File: `app\application\ports\chunking_port.py`
+## File: `app/application/ports/chunking_port.py`
 ```py
 from abc import ABC, abstractmethod
 from typing import List
@@ -95,7 +97,7 @@ class ChunkingPort(ABC):
         pass
 ```
 
-## File: `app\application\ports\extraction_port.py`
+## File: `app/application/ports/extraction_port.py`
 ```py
 from abc import ABC, abstractmethod
 from typing import List, Tuple, Union, Any, Dict # <--- AÑADIR Dict AQUÍ
@@ -141,12 +143,12 @@ class ExtractionPort(ABC):
         pass
 ```
 
-## File: `app\application\use_cases\__init__.py`
+## File: `app/application/use_cases/__init__.py`
 ```py
 
 ```
 
-## File: `app\application\use_cases\process_document_use_case.py`
+## File: `app/application/use_cases/process_document_use_case.py`
 ```py
 import time
 import structlog
@@ -282,12 +284,12 @@ class ProcessDocumentUseCase:
 
 ```
 
-## File: `app\core\__init__.py`
+## File: `app/core/__init__.py`
 ```py
 
 ```
 
-## File: `app\core\config.py`
+## File: `app/core/config.py`
 ```py
 # File: app/core/config.py
 import sys
@@ -367,7 +369,7 @@ except ValidationError as e:
     sys.exit(1)
 ```
 
-## File: `app\core\logging_config.py`
+## File: `app/core/logging_config.py`
 ```py
 import logging
 import sys
@@ -446,12 +448,72 @@ def setup_logging():
     log.info("Logging configured", log_level=settings.LOG_LEVEL)
 ```
 
-## File: `app\domain\__init__.py`
+## File: `app/dependencies.py`
+```py
+# File: app/dependencies.py
+from app.application.ports.extraction_port import ExtractionPort
+from app.application.ports.chunking_port import ChunkingPort
+from app.application.use_cases.process_document_use_case import ProcessDocumentUseCase
+
+# Importar implementaciones concretas (Adaptadores)
+from app.infrastructure.chunkers.default_chunker_adapter import DefaultChunkerAdapter
+from app.infrastructure.extractors import (
+    CompositeExtractorAdapter,
+    PdfAdapter,
+    DocxAdapter,
+    TxtAdapter,
+    HtmlAdapter,
+    MdAdapter,
+    ExcelAdapter,
+)
+
+def get_process_document_use_case() -> ProcessDocumentUseCase:
+    """
+    Inicializa y devuelve una instancia del ProcessDocumentUseCase con todas
+    sus dependencias concretas inyectadas.
+    """
+    # 1. Inicializar el adaptador de chunking
+    chunking_adapter: ChunkingPort = DefaultChunkerAdapter()
+
+    # 2. Inicializar todos los adaptadores de extracción específicos
+    pdf_extractor = PdfAdapter()
+    docx_extractor = DocxAdapter()
+    txt_extractor = TxtAdapter()
+    html_extractor = HtmlAdapter()
+    md_extractor = MdAdapter()
+    excel_extractor = ExcelAdapter()
+
+    # 3. Crear el adaptador de extracción compuesto
+    # Mapea los content types a su extractor correspondiente.
+    # Esta es la "inteligencia" que decide qué adaptador usar.
+    composite_extractor: ExtractionPort = CompositeExtractorAdapter(
+        extractors={
+            "application/pdf": pdf_extractor,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document": docx_extractor,
+            "application/msword": docx_extractor,  # DOCX adapter puede intentar manejar .doc
+            "text/plain": txt_extractor,
+            "text/html": html_extractor,
+            "text/markdown": md_extractor,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": excel_extractor,
+            "application/vnd.ms-excel": excel_extractor,
+        }
+    )
+
+    # 4. Inyectar los adaptadores en el caso de uso
+    process_document_use_case = ProcessDocumentUseCase(
+        extraction_port=composite_extractor,
+        chunking_port=chunking_adapter
+    )
+    
+    return process_document_use_case
+```
+
+## File: `app/domain/__init__.py`
 ```py
 
 ```
 
-## File: `app\domain\models.py`
+## File: `app/domain/models.py`
 ```py
 from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field
@@ -513,17 +575,17 @@ class ProcessResponse(BaseModel):
         }
 ```
 
-## File: `app\infrastructure\__init__.py`
+## File: `app/infrastructure/__init__.py`
 ```py
 
 ```
 
-## File: `app\infrastructure\chunkers\__init__.py`
+## File: `app/infrastructure/chunkers/__init__.py`
 ```py
 
 ```
 
-## File: `app\infrastructure\chunkers\default_chunker_adapter.py`
+## File: `app/infrastructure/chunkers/default_chunker_adapter.py`
 ```py
 import structlog
 from typing import List
@@ -592,15 +654,17 @@ class DefaultChunkerAdapter(ChunkingPort):
         return chunks
 ```
 
-## File: `app\infrastructure\extractors\__init__.py`
+## File: `app/infrastructure/extractors/__init__.py`
 ```py
+# File: app/infrastructure/extractors/__init__.py
 from .base_extractor import BaseExtractorAdapter
 from .pdf_adapter import PdfAdapter
 from .docx_adapter import DocxAdapter
 from .txt_adapter import TxtAdapter
 from .html_adapter import HtmlAdapter
 from .md_adapter import MdAdapter
-from .excel_adapter import ExcelAdapter # NUEVA LÍNEA
+from .excel_adapter import ExcelAdapter
+from .composite_extractor_adapter import CompositeExtractorAdapter
 
 __all__ = [
     "BaseExtractorAdapter",
@@ -609,11 +673,12 @@ __all__ = [
     "TxtAdapter",
     "HtmlAdapter",
     "MdAdapter",
-    "ExcelAdapter", # NUEVA LÍNEA
+    "ExcelAdapter",
+    "CompositeExtractorAdapter",
 ]
 ```
 
-## File: `app\infrastructure\extractors\base_extractor.py`
+## File: `app/infrastructure/extractors/base_extractor.py`
 ```py
 import structlog
 from app.application.ports.extraction_port import ExtractionPort, ExtractionError
@@ -629,7 +694,71 @@ class BaseExtractorAdapter(ExtractionPort):
         raise ExtractionError(f"Error extracting with {adapter_name} for {filename}: {e}") from e
 ```
 
-## File: `app\infrastructure\extractors\docx_adapter.py`
+## File: `app/infrastructure/extractors/composite_extractor_adapter.py`
+```py
+# File: app/infrastructure/extractors/composite_extractor_adapter.py
+from typing import Dict, Any, Tuple, Union, List
+import structlog
+
+from app.application.ports.extraction_port import ExtractionPort, UnsupportedContentTypeError, ExtractionError
+from .base_extractor import BaseExtractorAdapter
+
+log = structlog.get_logger(__name__)
+
+class CompositeExtractorAdapter(BaseExtractorAdapter):
+    """
+    Un adaptador compuesto que delega la extracción al adaptador apropiado
+    basado en el content_type.
+    """
+    def __init__(self, extractors: Dict[str, ExtractionPort]):
+        """
+        Inicializa el adaptador compuesto con un mapeo de content_type a extractor.
+        
+        Args:
+            extractors: Un diccionario donde las claves son content_types (ej. "application/pdf")
+                        y los valores son instancias de adaptadores de extracción.
+        """
+        self.extractors = extractors
+        self.log = log.bind(component="CompositeExtractorAdapter")
+        self.log.info("Initialized with supported content types", types=list(extractors.keys()))
+
+    def extract_text(
+        self,
+        file_bytes: bytes,
+        filename: str,
+        content_type: str
+    ) -> Tuple[Union[str, List[Tuple[int, str]]], Dict[str, Any]]:
+        """
+        Delega la extracción al adaptador correcto.
+        """
+        self.log.debug("Delegating extraction", filename=filename, content_type=content_type)
+        
+        # Normalizar content_type por si acaso (ej. con parámetros charset)
+        normalized_content_type = content_type.split(';')[0].strip().lower()
+
+        extractor = self.extractors.get(normalized_content_type)
+
+        if not extractor:
+            # Manejar tipos que son alias (ej. doc/docx)
+            if normalized_content_type == "application/msword":
+                extractor = self.extractors.get("application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            elif normalized_content_type == "application/vnd.ms-excel":
+                 extractor = self.extractors.get("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        
+        if not extractor:
+            self.log.warning("Unsupported content type for composite extraction", content_type=content_type)
+            raise UnsupportedContentTypeError(f"No extractor registered for content type: {content_type}")
+            
+        try:
+            return extractor.extract_text(file_bytes, filename, content_type)
+        except ExtractionError:
+            raise # Re-raise errores específicos de la extracción
+        except Exception as e:
+            # Capturar cualquier otro error inesperado del adaptador subyacente
+            raise self._handle_extraction_error(e, filename, f"CompositeAdapter -> {type(extractor).__name__}")
+```
+
+## File: `app/infrastructure/extractors/docx_adapter.py`
 ```py
 import io
 import docx  # python-docx
@@ -674,7 +803,7 @@ class DocxAdapter(BaseExtractorAdapter):
             raise self._handle_extraction_error(e, filename, "DocxAdapter")
 ```
 
-## File: `app\infrastructure\extractors\excel_adapter.py`
+## File: `app/infrastructure/extractors/excel_adapter.py`
 ```py
 import io
 import pandas as pd
@@ -752,7 +881,7 @@ class ExcelAdapter(BaseExtractorAdapter):
             raise self._handle_extraction_error(e, filename, "ExcelAdapter")
 ```
 
-## File: `app\infrastructure\extractors\html_adapter.py`
+## File: `app/infrastructure/extractors/html_adapter.py`
 ```py
 from bs4 import BeautifulSoup
 import structlog
@@ -798,7 +927,7 @@ class HtmlAdapter(BaseExtractorAdapter):
             raise self._handle_extraction_error(e, filename, "HtmlAdapter")
 ```
 
-## File: `app\infrastructure\extractors\md_adapter.py`
+## File: `app/infrastructure/extractors/md_adapter.py`
 ```py
 import markdown
 import html2text # To convert HTML generated from Markdown to clean text
@@ -843,7 +972,7 @@ class MdAdapter(BaseExtractorAdapter):
             raise self._handle_extraction_error(e, filename, "MdAdapter")
 ```
 
-## File: `app\infrastructure\extractors\pdf_adapter.py`
+## File: `app/infrastructure/extractors/pdf_adapter.py`
 ```py
 import fitz  # PyMuPDF
 import structlog
@@ -897,7 +1026,7 @@ class PdfAdapter(BaseExtractorAdapter):
             raise self._handle_extraction_error(e, filename, "PdfAdapter")
 ```
 
-## File: `app\infrastructure\extractors\txt_adapter.py`
+## File: `app/infrastructure/extractors/txt_adapter.py`
 ```py
 import structlog
 from typing import Tuple, Dict, Any, Union, List
@@ -950,7 +1079,7 @@ class TxtAdapter(BaseExtractorAdapter):
             raise e
 ```
 
-## File: `app\main.py`
+## File: `app/main.py`
 ```py
 # File: app/main.py (Reemplazado)
 import sys
@@ -961,7 +1090,7 @@ import tempfile
 import pathlib
 import asyncio
 import structlog
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 # Configurar logging primero que nada
 from app.core.logging_config import setup_logging
@@ -970,8 +1099,9 @@ setup_logging()
 from app.core.config import settings
 from app.services.kafka_clients import KafkaConsumerClient, KafkaProducerClient
 from app.services.s3_client import S3Client, S3ClientError
+
 from app.application.use_cases.process_document_use_case import ProcessDocumentUseCase
-from app.dependencies import get_process_document_use_case # Reutilizamos el inyector
+from app.dependencies import get_process_document_use_case
 
 log = structlog.get_logger(__name__)
 
@@ -1086,12 +1216,12 @@ if __name__ == "__main__":
     main()
 ```
 
-## File: `app\services\__init__.py`
+## File: `app/services/__init__.py`
 ```py
 
 ```
 
-## File: `app\services\kafka_clients.py`
+## File: `app/services/kafka_clients.py`
 ```py
 # File: app/services/kafka_clients.py
 import json
@@ -1143,7 +1273,7 @@ class KafkaConsumerClient:
             'bootstrap.servers': settings.KAFKA_BOOTSTRAP_SERVERS,
             'group.id': settings.KAFKA_CONSUMER_GROUP_ID,
             'auto.offset.reset': settings.KAFKA_AUTO_OFFSET_RESET,
-            'enable.auto.commit': False,  # Commits manuales para procesar "at-least-once"
+            'enable.auto.commit': False,
         }
         self.consumer = Consumer(consumer_config)
         self.consumer.subscribe(topics)
@@ -1163,12 +1293,7 @@ class KafkaConsumerClient:
                         self.log.error("Kafka consumer error", error=msg.error())
                         raise KafkaException(msg.error())
                 
-                # Mensaje válido recibido, lo entregamos para procesar
                 yield msg
-                
-                # Una vez procesado (fuera de esta función), se hace commit.
-                # Aquí simulamos el commit después de yield
-                self.consumer.commit(asynchronous=True)
                 
         except KeyboardInterrupt:
             self.log.info("Consumer loop interrupted by user.")
@@ -1184,10 +1309,12 @@ class KafkaConsumerClient:
         self.consumer.close()
 ```
 
-## File: `app\services\s3_client.py`
+## File: `app/services/s3_client.py`
 ```py
 # File: app/services/s3_client.py
 import boto3
+from botocore.config import Config
+from botocore import UNSIGNED
 from botocore.exceptions import ClientError
 import structlog
 from typing import Optional
@@ -1200,25 +1327,35 @@ class S3ClientError(Exception):
     pass
 
 class S3Client:
-    """Synchronous client to interact with Amazon S3."""
+    """Synchronous client to interact with Amazon S3 (anonymous/no IAM credentials)."""
 
     def __init__(self, bucket_name: Optional[str] = None):
         self.bucket_name = bucket_name or settings.AWS_S3_BUCKET_NAME
-        self.s3_client = boto3.client("s3", region_name=settings.AWS_REGION)
+        # Configurar boto3 para modo anónimo (sin credenciales IAM)
+        unsigned_config = Config(signature_version=UNSIGNED)
+        self.s3_client = boto3.client(
+            "s3",
+            region_name=settings.AWS_REGION,
+            config=unsigned_config
+        )
         self.log = log.bind(s3_bucket=self.bucket_name, aws_region=settings.AWS_REGION)
 
     def download_file_sync(self, object_name: str, download_path: str):
-        """Downloads a file from S3 to a local path."""
+        """Downloads a file from S3 to a local path (anonymous access)."""
         self.log.info("Downloading file from S3...", object_name=object_name, target_path=download_path)
         try:
             self.s3_client.download_file(self.bucket_name, object_name, download_path)
             self.log.info("File downloaded successfully from S3.", object_name=object_name)
         except ClientError as e:
-            if e.response['Error']['Code'] == '404':
+            code = e.response['Error']['Code']
+            if code == '404':
                 self.log.error("Object not found in S3", object_name=object_name)
                 raise S3ClientError(f"Object not found in S3: {object_name}") from e
+            elif code == 'AccessDenied':
+                self.log.error("Access Denied when trying to download from S3", object_name=object_name)
+                raise S3ClientError(f"Access Denied for S3 object: {object_name}. Ensure bucket allows public GetObject.") from e
             else:
-                self.log.error("S3 download failed", error_code=e.response.get("Error", {}).get("Code"), error=str(e))
+                self.log.error("S3 download failed", error_code=code, error=str(e))
                 raise S3ClientError(f"S3 error downloading {object_name}") from e
 ```
 
@@ -1227,10 +1364,11 @@ class S3Client:
 # File: pyproject.toml
 [tool.poetry]
 name = "docproc-service"
-version = "2.0.0-refactor"
+version = "2.0.0"
 description = "Atenex Document Processing Worker (Kafka Consumer/Producer)"
 authors = ["Atenex Team <dev@atenex.com>"]
 readme = "README.md"
+package-mode = false
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.13"

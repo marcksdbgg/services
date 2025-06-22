@@ -1,5 +1,7 @@
 # File: app/services/s3_client.py
 import boto3
+from botocore.config import Config
+from botocore import UNSIGNED  # <-- CORRECCIÓN 1: Importar la constante correcta
 from botocore.exceptions import ClientError
 import structlog
 from typing import Optional
@@ -18,8 +20,17 @@ class S3Client:
 
     def __init__(self, bucket_name: Optional[str] = None):
         self.bucket_name = bucket_name or settings.AWS_S3_BUCKET_NAME
-        # El cliente se crea usando las credenciales del entorno (IAM role en ECS)
-        self.s3_client = boto3.client("s3", region_name=settings.AWS_REGION)
+        
+        # Configurar boto3 para usar modo anónimo (sin firma de credenciales).
+        # Esto es útil para interactuar con buckets S3 públicos o emuladores locales
+        # como MinIO sin necesidad de credenciales de AWS.
+        unsigned_config = Config(signature_version=UNSIGNED) # <-- CORRECCIÓN 2: Usar la constante en lugar del string
+        self.s3_client = boto3.client(
+            "s3",
+            region_name=settings.AWS_REGION,
+            config=unsigned_config
+        )
+
         self.log = log.bind(s3_bucket=self.bucket_name, aws_region=settings.AWS_REGION)
 
     async def upload_file_async(self, object_name: str, data: bytes, content_type: str) -> str:
@@ -28,7 +39,7 @@ class S3Client:
         loop = asyncio.get_running_loop()
         try:
             await loop.run_in_executor(
-                None,  # Usa el executor por defecto (ThreadPoolExecutor)
+                None,
                 lambda: self.s3_client.put_object(
                     Bucket=self.bucket_name,
                     Key=object_name,
