@@ -1,4 +1,4 @@
-# Estructura de la Codebase
+# Estructura de la Codebase del Microservicio docproc-service
 
 ```
 app/
@@ -40,7 +40,7 @@ app/
     └── s3_client.py
 ```
 
-# Codebase: `app`
+# Codebase del Microservicio docproc-service: `app`
 
 ## File: `app\__init__.py`
 ```py
