@@ -1,4 +1,4 @@
-# Estructura de la Codebase
+# Estructura de la Codebase del Microservicio embedding-service
 
 ```
 app/
@@ -30,7 +30,7 @@ app/
     └── kafka_clients.py
 ```
 
-# Codebase: `app`
+# Codebase del Microservicio embedding-service: `app`
 
 ## File: `app\__init__.py`
 ```py
@@ -168,7 +168,7 @@ class EmbedTextsUseCase:
 
 ## File: `app\core\config.py`
 ```py
-# File: app/core/config.py
+# File: embedding-service/app/core/config.py
 import sys
 import logging
 from typing import Optional
@@ -184,7 +184,7 @@ class Settings(BaseSettings):
         extra='ignore'
     )
 
-    PROJECT_NAME: str = "Atenex Embedding Worker"
+    PROJECT_NAME: str = "Atenex Embedding Worker (OpenAI)"
     LOG_LEVEL: str = "INFO"
 
     # --- OpenAI Embedding Model ---
@@ -209,14 +209,6 @@ class Settings(BaseSettings):
             raise ValueError(f"Invalid LOG_LEVEL '{v}'. Must be one of {valid_levels}")
         return v.upper()
 
-    @field_validator('OPENAI_API_KEY', 'KAFKA_BOOTSTRAP_SERVERS', mode='before')
-    @classmethod
-    def check_required_fields(cls, v: Optional[str], info) -> str:
-        if not v:
-            raise ValueError(f"Required environment variable for '{info.field_name}' is not set.")
-        return v
-
-# Configuración básica de logging para la fase de carga
 temp_log = logging.getLogger("embedding_service.config.loader")
 if not temp_log.handlers:
     handler = logging.StreamHandler(sys.stdout)
@@ -230,11 +222,7 @@ try:
     temp_log.info("--- Embedding Worker Settings Loaded ---")
     temp_log.info(f"  PROJECT_NAME: {settings.PROJECT_NAME}")
     temp_log.info(f"  LOG_LEVEL: {settings.LOG_LEVEL}")
-    temp_log.info(f"  OPENAI_EMBEDDING_MODEL_NAME: {settings.OPENAI_EMBEDDING_MODEL_NAME}")
-    temp_log.info(f"  EMBEDDING_DIMENSION: {settings.EMBEDDING_DIMENSION}")
     temp_log.info(f"  KAFKA_BOOTSTRAP_SERVERS: {settings.KAFKA_BOOTSTRAP_SERVERS}")
-    temp_log.info(f"  KAFKA_INPUT_TOPIC: {settings.KAFKA_INPUT_TOPIC}")
-    temp_log.info(f"  KAFKA_OUTPUT_TOPIC: {settings.KAFKA_OUTPUT_TOPIC}")
     temp_log.info("----------------------------------------")
 except Exception as e:
     temp_log.critical(f"FATAL: Error loading Embedding Worker settings: {e}")
@@ -660,145 +648,107 @@ class OpenAIAdapter(EmbeddingModelPort):
 
 ## File: `app\main.py`
 ```py
-# File: app/main.py
+# File: embedding-service/app/main.py
 import sys
 import json
 import asyncio
 import structlog
-from typing import Dict, Any, List
+from typing import Any, List, Generator
 
 # Configurar logging primero que nada
 from app.core.logging_config import setup_logging
 setup_logging()
 
 from app.core.config import settings
-from app.services.kafka_clients import KafkaConsumerClient, KafkaProducerClient
+from app.services.kafka_clients import KafkaConsumerClient, KafkaProducerClient, KafkaError
 from app.infrastructure.embedding_models.openai_adapter import OpenAIAdapter
 from app.application.use_cases.embed_texts_use_case import EmbedTextsUseCase
 
 log = structlog.get_logger(__name__)
 
-# Variable global para el caso de uso
-use_case: EmbedTextsUseCase
-
 def main():
     """Punto de entrada principal para el worker de embeddings."""
-    global use_case
-    log.info("Initializing Embedding Worker...", config=settings.model_dump(exclude=['OPENAI_API_KEY']))
-
+    log.info("Initializing Embedding Worker...")
     try:
-        # Inicializar el adaptador del modelo y el caso de uso
         openai_adapter = OpenAIAdapter()
         asyncio.run(openai_adapter.initialize_model())
         use_case = EmbedTextsUseCase(embedding_model=openai_adapter)
         
-        # Inicializar clientes de Kafka
         consumer = KafkaConsumerClient(topics=[settings.KAFKA_INPUT_TOPIC])
         producer = KafkaProducerClient()
     except Exception as e:
         log.critical("Failed to initialize worker dependencies", error=str(e), exc_info=True)
         sys.exit(1)
 
-    log.info("Worker initialized successfully. Starting message consumption loop...")
-
+    log.info("Worker initialized successfully. Starting consumption loop...")
     try:
-        # Procesar mensajes en lotes para eficiencia
-        for message_batch in batch_consumer(consumer, batch_size=20, batch_timeout_s=5):
+        for message_batch in batch_consumer(consumer, batch_size=50, batch_timeout_s=5):
             process_message_batch(message_batch, use_case, producer)
-            # El commit se hace por lote después de procesar
             consumer.commit(message=message_batch[-1])
-
     except KeyboardInterrupt:
         log.info("Shutdown signal received.")
     except Exception as e:
-        log.critical("Critical error in consumer loop. Exiting.", error=str(e), exc_info=True)
+        log.critical("Critical error in consumer loop.", error=str(e), exc_info=True)
     finally:
         log.info("Closing worker resources...")
         consumer.close()
         producer.flush()
         log.info("Worker shut down gracefully.")
 
-
-def batch_consumer(consumer: KafkaConsumerClient, batch_size: int, batch_timeout_s: int):
-    """Generador que agrupa mensajes de Kafka en lotes."""
+def batch_consumer(consumer: KafkaConsumerClient, batch_size: int, batch_timeout_s: int) -> Generator[List[Any], None, None]:
+    """Agrupa mensajes de Kafka en lotes para un procesamiento eficiente."""
     batch = []
     while True:
         msg = consumer.consumer.poll(timeout=batch_timeout_s)
         if msg is None:
-            if batch:
-                yield batch
-                batch = []
+            if batch: yield batch; batch = []
             continue
-
         if msg.error():
             if msg.error().code() != KafkaError._PARTITION_EOF:
-                 log.error("Kafka consumer poll error", error=msg.error())
+                log.error("Kafka consumer poll error", error=msg.error())
             continue
-
         batch.append(msg)
         if len(batch) >= batch_size:
-            yield batch
-            batch = []
+            yield batch; batch = []
 
-def process_message_batch(message_batch: List[Any], use_case_instance: EmbedTextsUseCase, producer: KafkaProducerClient):
-    """Procesa un lote de mensajes de Kafka para generar embeddings."""
+def process_message_batch(message_batch: List[Any], use_case: EmbedTextsUseCase, producer: KafkaProducerClient):
     batch_log = log.bind(batch_size=len(message_batch))
-    batch_log.info("Processing a new batch of messages.")
-
-    texts_to_embed = []
-    message_metadata = []
-    
+    texts_to_embed, metadata_list = [], []
     for msg in message_batch:
         try:
             event_data = json.loads(msg.value().decode('utf-8'))
-            text = event_data.get("text")
-            if text and isinstance(text, str):
+            if text := event_data.get("text"):
                 texts_to_embed.append(text)
-                message_metadata.append({
-                    "document_id": event_data.get("document_id"),
-                    "chunk_id": event_data.get("chunk_id")
-                })
+                metadata_list.append({k: v for k, v in event_data.items() if k != "text"})
             else:
-                 batch_log.warning("Skipping message with invalid or missing 'text' field.", kafka_offset=msg.offset())
+                batch_log.warning("Skipping message with missing 'text' field", offset=msg.offset())
         except json.JSONDecodeError:
-            batch_log.error("Failed to decode Kafka message value.", kafka_offset=msg.offset())
+            batch_log.error("Failed to decode Kafka message", offset=msg.offset())
 
     if not texts_to_embed:
         batch_log.warning("No valid texts to embed in this batch.")
         return
 
     try:
-        # Generar embeddings para todo el lote de una sola vez
-        embeddings, model_info = asyncio.run(use_case_instance.execute(texts_to_embed))
-        batch_log.info(f"Generated {len(embeddings)} embeddings.", model_name=model_info.model_name)
-        
-        if len(embeddings) != len(message_metadata):
-            batch_log.error("Mismatch between generated embeddings and message metadata.",
-                            num_embeddings=len(embeddings), num_metadata=len(message_metadata))
-            return # Salta este lote problemático
+        embeddings, _ = asyncio.run(use_case.execute(texts_to_embed))
+        if len(embeddings) != len(metadata_list):
+            batch_log.error("Mismatch in embedding results count.", expected=len(metadata_list), got=len(embeddings))
+            return
 
-        # Producir un mensaje de salida por cada embedding generado
         for i, vector in enumerate(embeddings):
-            meta = message_metadata[i]
+            meta = metadata_list[i]
+            # Se propaga el company_id para que Flink pueda usarlo
             output_payload = {
-                "chunk_id": meta["chunk_id"],
-                "document_id": meta["document_id"],
-                "vector": vector
+                "chunk_id": meta.get("chunk_id"),
+                "document_id": meta.get("document_id"),
+                "company_id": meta.get("company_id"), 
+                "vector": vector,
             }
-            producer.produce(
-                topic=settings.KAFKA_OUTPUT_TOPIC,
-                key=meta["document_id"], # Particionar por document_id
-                value=output_payload
-            )
+            producer.produce(settings.KAFKA_OUTPUT_TOPIC, key=meta.get("document_id"), value=output_payload)
         
-        batch_log.info("All embeddings for the batch produced to output topic.")
-
+        batch_log.info(f"Processed and produced {len(embeddings)} embeddings.")
     except Exception as e:
         batch_log.error("Unhandled error processing batch", error=str(e), exc_info=True)
-
-
-if __name__ == "__main__":
-    main()
 ```
 
 ## File: `app\services\__init__.py`
@@ -894,18 +844,16 @@ class KafkaConsumerClient:
 
 ## File: `pyproject.toml`
 ```toml
-# File: pyproject.toml
+# File: embedding-service/pyproject.toml
 [tool.poetry]
 name = "embedding-service"
-version = "2.0.0-refactor"
+version = "2.1.0-final"
 description = "Atenex Embedding Worker using OpenAI (Kafka Consumer/Producer)"
 authors = ["Atenex Team <dev@atenex.com>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.13"
-
-# Core utilities
 pydantic = {extras = ["email"], version = "^2.6.4"}
 pydantic-settings = "^2.2.1"
 structlog = "^24.1.0"
@@ -917,7 +865,6 @@ openai = "^1.14.0"
 
 # --- Kafka Client ---
 confluent-kafka = "^2.4.0"
-
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.4"

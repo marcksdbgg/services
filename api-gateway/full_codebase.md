@@ -1,4 +1,4 @@
-# Estructura de la Codebase
+# Estructura de la Codebase del Microservicio api-gateway
 
 ```
 app/
@@ -14,7 +14,7 @@ app/
 └── utils
 ```
 
-# Codebase: `app`
+# Codebase del Microservicio api-gateway: `app`
 
 ## File: `app\__init__.py`
 ```py

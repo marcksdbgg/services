@@ -30,10 +30,13 @@ def generate_codebase_markdown(base_path: str = ".", output_file: str = "full_co
         print(f"[ERROR] La carpeta 'app' no existe en {base}")
         return
 
+    # Obtener el nombre del microservicio (nombre de la carpeta contenedora de app)
+    microservice_name = base.name
+
     lines = []
 
     # Agregar la estructura de directorios al inicio del Markdown
-    lines.append("# Estructura de la Codebase")
+    lines.append(f"# Estructura de la Codebase del Microservicio {microservice_name}")
     lines.append("")
     lines.append("```")
     lines.append("app/")
@@ -43,7 +46,7 @@ def generate_codebase_markdown(base_path: str = ".", output_file: str = "full_co
     lines.append("")
 
     # Agregar el contenido de la codebase en Markdown
-    lines.append("# Codebase: `app`")
+    lines.append(f"# Codebase del Microservicio {microservice_name}: `app`")
     lines.append("")
 
     # Recorrer solo la carpeta app

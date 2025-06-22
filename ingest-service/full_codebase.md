@@ -1,4 +1,4 @@
-# Estructura de la Codebase
+# Estructura de la Codebase del Microservicio ingest-service
 
 ```
 app/
@@ -15,9 +15,6 @@ app/
 │   ├── __init__.py
 │   ├── config.py
 │   └── logging_config.py
-├── db
-│   ├── __init__.py
-│   └── postgres_client.py
 ├── main.py
 ├── models
 │   ├── __init__.py
@@ -28,7 +25,7 @@ app/
     └── s3_client.py
 ```
 
-# Codebase: `app`
+# Codebase del Microservicio ingest-service: `app`
 
 ## File: `app\__init__.py`
 ```py
@@ -52,65 +49,33 @@ app/
 
 ## File: `app\api\v1\endpoints\ingest.py`
 ```py
-# File: app/api/v1/endpoints/ingest.py
+# File: ingest-service/app/api/v1/endpoints/ingest.py
 import uuid
 import json
-from typing import List, Optional, Dict, Any
-import asyncio
-from contextlib import asynccontextmanager
+from typing import Optional
 
 import structlog
-import asyncpg
 from fastapi import (
     APIRouter, Depends, HTTPException, status,
     UploadFile, File, Form, Request
 )
 
 from app.core.config import settings
-from app.db import postgres_client as db_client
-from app.models.domain import DocumentStatus
-from app.api.v1.schemas import IngestResponse, StatusResponse
+from app.api.v1.schemas import IngestResponse
 from app.services.s3_client import S3Client, S3ClientError
-from app.services.kafka_producer import KafkaProducerClient
+from app.services.kafka_producer import KafkaProducerClient, KafkaException
 
 log = structlog.get_logger(__name__)
 router = APIRouter()
 
-# --- Dependencias ---
-
 def get_s3_client():
-    """Dependency para obtener el cliente S3."""
-    try:
-        return S3Client()
-    except Exception as e:
-        log.exception("Failed to initialize S3Client dependency.", error=str(e))
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Storage service (S3) configuration error."
-        )
+    return S3Client()
 
 def get_kafka_producer(request: Request) -> KafkaProducerClient:
-    """Dependency para obtener el productor de Kafka del estado de la app."""
     return request.app.state.kafka_producer
 
-@asynccontextmanager
-async def get_db_conn():
-    """Context manager para obtener una conexión del pool de DB."""
-    pool = await db_client.get_db_pool()
-    conn = None
-    try:
-        conn = await pool.acquire()
-        yield conn
-    finally:
-        if conn:
-            await pool.release(conn)
-
 def normalize_filename(filename: str) -> str:
-    """Normaliza el nombre de archivo eliminando espacios extra."""
     return " ".join(filename.strip().split())
-
-
-# --- Endpoints ---
 
 @router.post(
     "/upload",
@@ -125,124 +90,45 @@ async def upload_document(
     s3_client: S3Client = Depends(get_s3_client),
     kafka_producer: KafkaProducerClient = Depends(get_kafka_producer),
 ):
-    company_id = request.headers.get("X-Company-ID")
-    req_id = getattr(request.state, 'request_id', str(uuid.uuid4()))
-    endpoint_log = log.bind(request_id=req_id)
-
-    if not company_id:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Missing X-Company-ID header.")
+    company_id = request.headers.get("X-Company-ID", "default-company") # Usar un valor por defecto si no viene
     
-    try:
-        company_uuid = uuid.UUID(company_id)
-    except ValueError:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid Company ID format.")
-
-    normalized_filename = normalize_filename(file.filename)
-    endpoint_log = endpoint_log.bind(company_id=company_id, filename=normalized_filename)
+    endpoint_log = log.bind(company_id=company_id, filename=file.filename)
     endpoint_log.info("Document upload request received.")
 
-    metadata = {}
-    if metadata_json:
-        try:
-            metadata = json.loads(metadata_json)
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid metadata JSON format.")
+    if file.content_type not in settings.SUPPORTED_CONTENT_TYPES:
+        raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="Unsupported file type")
 
-    async with get_db_conn() as conn:
-        existing_doc = await db_client.find_document_by_name_and_company(conn, normalized_filename, company_uuid)
-        if existing_doc and existing_doc['status'] != DocumentStatus.ERROR.value:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Document '{normalized_filename}' already exists.")
-
-    document_id = uuid.uuid4()
+    document_id = str(uuid.uuid4())
+    normalized_filename = normalize_filename(file.filename)
     s3_path = f"{company_id}/{document_id}/{normalized_filename}"
-
-    async with get_db_conn() as conn:
-        await db_client.create_document_record(
-            conn, document_id, company_uuid, normalized_filename, file.content_type, s3_path, DocumentStatus.PENDING, metadata
-        )
-
+    
     try:
         file_content = await file.read()
         await s3_client.upload_file_async(s3_path, file_content, file.content_type)
         
-        async with get_db_conn() as conn:
-            await db_client.update_document_status(conn, document_id, DocumentStatus.UPLOADED)
-        
-        # Producir mensaje a Kafka
-        kafka_payload = {"document_id": str(document_id), "company_id": company_id, "s3_path": s3_path}
+        kafka_payload = {
+            "document_id": document_id,
+            "company_id": company_id,
+            "s3_path": s3_path
+        }
         kafka_producer.produce(
             topic=settings.KAFKA_DOCUMENTS_RAW_TOPIC,
-            key=str(document_id),
+            key=document_id,
             value=kafka_payload
         )
-        endpoint_log.info("Message produced to Kafka topic.", topic=settings.KAFKA_DOCUMENTS_RAW_TOPIC, key=str(document_id))
+        endpoint_log.info("File uploaded to S3 and message produced to Kafka.", s3_path=s3_path)
 
-    except (S3ClientError, KafkaException, Exception) as e:
-        error_message = f"Failed during S3 upload or Kafka production: {type(e).__name__}"
-        endpoint_log.exception("Error after creating DB record", error=error_message)
-        async with get_db_conn() as conn:
-            await db_client.update_document_status(conn, document_id, DocumentStatus.ERROR, error_message)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=error_message)
+    except (S3ClientError, KafkaException) as e:
+        endpoint_log.exception("Error during S3 upload or Kafka production", error=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to process file upload.")
     finally:
         await file.close()
 
-    # El task_id ya no existe
     return IngestResponse(
         document_id=document_id,
-        task_id="deprecated_kafka_pipeline",
-        status=DocumentStatus.UPLOADED.value,
-        message="Document uploaded and event sent to Kafka for processing."
+        status="Event-Sent",
+        message="Document received and processing event sent to Kafka."
     )
-
-
-@router.get(
-    "/status/{document_id}",
-    response_model=StatusResponse,
-    summary="Get the status of a specific document.",
-)
-async def get_document_status(
-    request: Request,
-    document_id: uuid.UUID,
-):
-    company_id = request.headers.get("X-Company-ID")
-    if not company_id:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Missing X-Company-ID header.")
-    try:
-        company_uuid = uuid.UUID(company_id)
-    except ValueError:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid Company ID format.")
-
-    async with get_db_conn() as conn:
-        doc_data = await db_client.get_document_by_id(conn, document_id, company_uuid)
-    
-    if not doc_data:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
-    
-    return StatusResponse(**doc_data)
-
-
-@router.get(
-    "/status",
-    response_model=List[StatusResponse],
-    summary="List document statuses for a company.",
-)
-async def list_document_statuses(
-    request: Request,
-    limit: int = 30,
-    offset: int = 0,
-):
-    company_id = request.headers.get("X-Company-ID")
-    if not company_id:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Missing X-Company-ID header.")
-    try:
-        company_uuid = uuid.UUID(company_id)
-    except ValueError:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid Company ID format.")
-
-    async with get_db_conn() as conn:
-        docs, _ = await db_client.list_documents_paginated(conn, company_uuid, limit, offset)
-    
-    return [StatusResponse(**doc) for doc in docs]
 ```
 
 ## File: `app\api\v1\schemas.py`
@@ -422,12 +308,11 @@ class DocumentStatsResponse(BaseModel):
 
 ## File: `app\core\config.py`
 ```py
-# File: app/core/config.py
-import os
+# File: ingest-service/app/core/config.py
 import sys
 import logging
-from typing import Optional, List
-from pydantic import Field, field_validator, SecretStr, AnyHttpUrl
+from typing import List, Optional
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -439,18 +324,11 @@ class Settings(BaseSettings):
         extra='ignore'
     )
 
-    PROJECT_NAME: str = "Atenex Ingest Service (Kafka Producer)"
+    PROJECT_NAME: str = "Atenex Ingest Service (Kafka Producer, DB-less)"
     API_V1_STR: str = "/api/v1/ingest"
     LOG_LEVEL: str = "INFO"
 
-    # --- PostgreSQL (se mantiene para metadatos del documento) ---
-    POSTGRES_USER: str = "postgres"
-    POSTGRES_PASSWORD: SecretStr
-    POSTGRES_SERVER: str = "postgresql.nyro-develop.svc.cluster.local"
-    POSTGRES_PORT: int = 5432
-    POSTGRES_DB: str = "atenex"
-
-    # --- AWS S3 (reemplaza GCS) ---
+    # --- AWS S3 ---
     AWS_S3_BUCKET_NAME: str = Field(description="Name of the S3 bucket for storing original files.")
     AWS_REGION: str = Field(default="us-east-1", description="AWS region for S3 client.")
 
@@ -458,17 +336,11 @@ class Settings(BaseSettings):
     KAFKA_BOOTSTRAP_SERVERS: str = Field(description="Comma-separated list of Kafka bootstrap servers.")
     KAFKA_DOCUMENTS_RAW_TOPIC: str = Field(default="documents.raw", description="Kafka topic for new raw documents.")
     KAFKA_PRODUCER_ACKS: str = "all"
-    KAFKA_PRODUCER_LINGER_MS: int = 10
     
     SUPPORTED_CONTENT_TYPES: List[str] = [
-        "application/pdf",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "application/msword",
-        "text/plain",
-        "text/markdown",
-        "text/html",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "application/vnd.ms-excel",
+        "application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/msword", "text/plain", "text/markdown", "text/html",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.ms-excel",
     ]
 
     @field_validator('LOG_LEVEL')
@@ -479,15 +351,7 @@ class Settings(BaseSettings):
             raise ValueError(f"Invalid LOG_LEVEL '{v}'. Must be one of {valid_levels}")
         return v.upper()
 
-    @field_validator('POSTGRES_PASSWORD', 'AWS_S3_BUCKET_NAME', 'KAFKA_BOOTSTRAP_SERVERS', mode='before')
-    @classmethod
-    def check_required_fields(cls, v: Optional[str], info) -> str:
-        if not v:
-            raise ValueError(f"Required environment variable for '{info.field_name}' is not set.")
-        return v
-
 temp_log = logging.getLogger("ingest_service.config.loader")
-# Basic setup for config loading phase
 if not temp_log.handlers:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
@@ -495,16 +359,13 @@ if not temp_log.handlers:
     temp_log.setLevel(logging.INFO)
 
 try:
-    temp_log.info("Loading Ingest Service settings for Kafka Producer...")
+    temp_log.info("Loading DB-less Ingest Service settings...")
     settings = Settings()
-    temp_log.info("--- Ingest Service Settings Loaded ---")
+    temp_log.info("--- DB-less Ingest Service Settings Loaded ---")
     temp_log.info(f"  PROJECT_NAME: {settings.PROJECT_NAME}")
-    temp_log.info(f"  LOG_LEVEL: {settings.LOG_LEVEL}")
-    temp_log.info(f"  POSTGRES_SERVER: {settings.POSTGRES_SERVER}:{settings.POSTGRES_PORT}")
     temp_log.info(f"  AWS_S3_BUCKET_NAME: {settings.AWS_S3_BUCKET_NAME}")
     temp_log.info(f"  KAFKA_BOOTSTRAP_SERVERS: {settings.KAFKA_BOOTSTRAP_SERVERS}")
-    temp_log.info(f"  KAFKA_DOCUMENTS_RAW_TOPIC: {settings.KAFKA_DOCUMENTS_RAW_TOPIC}")
-    temp_log.info("--------------------------------------")
+    temp_log.info("------------------------------------------")
 except Exception as e:
     temp_log.critical(f"FATAL: Error loading Ingest Service settings: {e}")
     sys.exit("FATAL: Invalid configuration. Check logs.")
@@ -589,124 +450,20 @@ def setup_logging():
     log.info("Logging configured", log_level=settings.LOG_LEVEL, is_celery_worker=is_celery_worker)
 ```
 
-## File: `app\db\__init__.py`
-```py
-
-```
-
-## File: `app\db\postgres_client.py`
-```py
-# File: app/db/postgres_client.py
-import uuid
-from typing import Any, Optional, Dict, List, Tuple
-import asyncpg
-import structlog
-import json
-
-from app.core.config import settings
-from app.models.domain import DocumentStatus
-
-log = structlog.get_logger(__name__)
-
-# --- Pool de Conexiones Asíncronas (para la API) ---
-_pool: Optional[asyncpg.Pool] = None
-
-# --- Gestión del Pool Asíncrono ---
-async def get_db_pool() -> asyncpg.Pool:
-    global _pool
-    if _pool is None or _pool._closed:
-        log.info("Creating PostgreSQL async connection pool...")
-        try:
-            _pool = await asyncpg.create_pool(
-                user=settings.POSTGRES_USER,
-                password=settings.POSTGRES_PASSWORD.get_secret_value(),
-                database=settings.POSTGRES_DB,
-                host=settings.POSTGRES_SERVER,
-                port=settings.POSTGRES_PORT,
-                min_size=2,
-                max_size=10,
-            )
-            log.info("PostgreSQL async connection pool created.")
-        except Exception as e:
-            log.critical("Failed to create PostgreSQL async pool", error=str(e))
-            raise ConnectionError("Could not connect to the database.") from e
-    return _pool
-
-async def close_db_pool():
-    global _pool
-    if _pool:
-        log.info("Closing PostgreSQL async connection pool.")
-        await _pool.close()
-        _pool = None
-
-async def check_db_connection() -> bool:
-    try:
-        pool = await get_db_pool()
-        async with pool.acquire() as conn:
-            return await conn.fetchval("SELECT 1") == 1
-    except Exception:
-        return False
-
-# --- Operaciones Asíncronas con la Base de Datos ---
-
-async def create_document_record(conn: asyncpg.Connection, doc_id: uuid.UUID, company_id: uuid.UUID, filename: str, file_type: str, file_path: str, status: DocumentStatus, metadata: Optional[Dict[str, Any]] = None) -> None:
-    query = """
-    INSERT INTO documents (id, company_id, file_name, file_type, file_path, metadata, status, uploaded_at, updated_at)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, NOW() AT TIME ZONE 'UTC', NOW() AT TIME ZONE 'UTC');
-    """
-    await conn.execute(query, doc_id, company_id, filename, file_type, file_path, json.dumps(metadata) if metadata else None, status.value)
-
-async def find_document_by_name_and_company(conn: asyncpg.Connection, filename: str, company_id: uuid.UUID) -> Optional[Dict[str, Any]]:
-    query = "SELECT id, status FROM documents WHERE file_name = $1 AND company_id = $2;"
-    record = await conn.fetchrow(query, filename, company_id)
-    return dict(record) if record else None
-
-async def update_document_status(conn: asyncpg.Connection, document_id: uuid.UUID, status: DocumentStatus, error_message: Optional[str] = None) -> bool:
-    set_clauses = ["status = $2", "updated_at = NOW() AT TIME ZONE 'UTC'"]
-    params = [document_id, status.value]
-    if status == DocumentStatus.ERROR:
-        set_clauses.append("error_message = $3")
-        params.append(error_message)
-    query = f"UPDATE documents SET {', '.join(set_clauses)} WHERE id = $1;"
-    result = await conn.execute(query, *params)
-    return result == 'UPDATE 1'
-
-async def get_document_by_id(conn: asyncpg.Connection, doc_id: uuid.UUID, company_id: uuid.UUID) -> Optional[Dict[str, Any]]:
-    query = "SELECT * FROM documents WHERE id = $1 AND company_id = $2;"
-    record = await conn.fetchrow(query, doc_id, company_id)
-    return dict(record) if record else None
-
-async def list_documents_paginated(conn: asyncpg.Connection, company_id: uuid.UUID, limit: int, offset: int) -> Tuple[List[Dict[str, Any]], int]:
-    query = "SELECT *, COUNT(*) OVER() AS total_count FROM documents WHERE company_id = $1 ORDER BY updated_at DESC LIMIT $2 OFFSET $3;"
-    rows = await conn.fetch(query, company_id, limit, offset)
-    if not rows:
-        return [], 0
-    total = rows[0]['total_count']
-    results = [dict(r) for r in rows]
-    return results, total
-
-async def delete_document(conn: asyncpg.Connection, doc_id: uuid.UUID, company_id: uuid.UUID) -> bool:
-    # Ahora la tabla de chunks no existe, así que el ON DELETE CASCADE no aplica aquí
-    query = "DELETE FROM documents WHERE id = $1 AND company_id = $2;"
-    result = await conn.execute(query, doc_id, company_id)
-    return result == 'DELETE 1'
-```
-
 ## File: `app\main.py`
 ```py
-# File: app/main.py
+# File: ingest-service/app/main.py
 import time
 import uuid
 import structlog
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status as fastapi_status
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse
 
 from app.core.logging_config import setup_logging
 setup_logging()
 
 from app.core.config import settings
-from app.db import postgres_client
 from app.api.v1.endpoints import ingest
 from app.services.kafka_producer import KafkaProducerClient
 
@@ -716,19 +473,17 @@ log = structlog.get_logger(__name__)
 async def lifespan(app: FastAPI):
     log.info("Ingest Service startup sequence initiated...")
     app.state.kafka_producer = KafkaProducerClient()
-    await postgres_client.get_db_pool() # Inicializa el pool de la DB
-    log.info("Dependencies (DB Pool, Kafka Producer) initialized.")
+    log.info("Dependencies (Kafka Producer) initialized.")
     yield
     log.info("Ingest Service shutdown sequence initiated...")
     app.state.kafka_producer.flush()
-    await postgres_client.close_db_pool()
     log.info("Shutdown sequence complete.")
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
-    version="2.0.0-refactor",
-    description="Atenex Ingest Service (Refactored to be a Kafka Producer).",
+    version="2.1.0-final",
+    description="Atenex Ingest Service. Uploads files to S3 and produces events to Kafka.",
     lifespan=lifespan,
 )
 
@@ -739,27 +494,15 @@ async def add_request_context(request: Request, call_next):
     structlog.contextvars.bind_contextvars(request_id=request_id)
     response = await call_next(request)
     process_time = (time.perf_counter() - start_time) * 1000
-    log.info(
-        "Request processed",
-        method=request.method,
-        path=request.url.path,
-        status_code=response.status_code,
-        duration_ms=round(process_time, 2)
-    )
+    log.info("Request processed", method=request.method, path=request.url.path, status_code=response.status_code, duration_ms=round(process_time, 2))
     return response
 
 app.include_router(ingest.router, prefix=settings.API_V1_STR, tags=["Ingestion"])
 
 @app.get("/health", tags=["Health Check"])
 async def health_check():
-    db_ok = await postgres_client.check_db_connection()
-    if db_ok:
-        return {"status": "healthy", "database": "ok"}
-    else:
-        return JSONResponse(
-            status_code=fastapi_status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={"status": "unhealthy", "database": "error"}
-        )
+    # El health check ya no depende de la base de datos
+    return {"status": "healthy"}
 ```
 
 ## File: `app\models\__init__.py`
@@ -972,11 +715,11 @@ class S3Client:
 
 ## File: `pyproject.toml`
 ```toml
-# File: pyproject.toml
+# File: ingest-service/pyproject.toml
 [tool.poetry]
 name = "ingest-service"
-version = "2.0.0-refactor"
-description = "Ingest service for Atenex - Kafka Producer (Refactored for AWS)"
+version = "2.1.0-final"
+description = "Ingest service for Atenex - Kafka Producer (Refactored for AWS, DB-less)"
 authors = ["Atenex Team <dev@atenex.com>"]
 readme = "README.md"
 
@@ -987,7 +730,6 @@ uvicorn = {extras = ["standard"], version = "^0.28.0"}
 gunicorn = "^21.2.0"
 pydantic = {extras = ["email"], version = "^2.6.4"}
 pydantic-settings = "^2.2.1"
-asyncpg = "^0.29.0"
 tenacity = "^8.2.3"
 python-multipart = "^0.0.9"
 structlog = "^24.1.0"
