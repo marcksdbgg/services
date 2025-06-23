@@ -49,3 +49,4 @@ Politica del bucket:
     ]
 }
 
+txt.
