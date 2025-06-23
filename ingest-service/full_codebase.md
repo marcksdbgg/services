@@ -27,27 +27,27 @@ app/
 
 # Codebase del Microservicio ingest-service: `app`
 
-## File: `app/__init__.py`
+## File: `app\__init__.py`
 ```py
 
 ```
 
-## File: `app/api/__init__.py`
+## File: `app\api\__init__.py`
 ```py
 
 ```
 
-## File: `app/api/v1/__init__.py`
+## File: `app\api\v1\__init__.py`
 ```py
 
 ```
 
-## File: `app/api/v1/endpoints/__init__.py`
+## File: `app\api\v1\endpoints\__init__.py`
 ```py
 
 ```
 
-## File: `app/api/v1/endpoints/ingest.py`
+## File: `app\api\v1\endpoints\ingest.py`
 ```py
 # File: ingest-service/app/api/v1/endpoints/ingest.py
 import uuid
@@ -131,7 +131,7 @@ async def upload_document(
     )
 ```
 
-## File: `app/api/v1/schemas.py`
+## File: `app\api\v1\schemas.py`
 ```py
 # File: ingest-service/app/api/v1/schemas.py
 import uuid
@@ -160,12 +160,12 @@ class IngestResponse(BaseModel):
         }
 ```
 
-## File: `app/core/__init__.py`
+## File: `app\core\__init__.py`
 ```py
 
 ```
 
-## File: `app/core/config.py`
+## File: `app\core\config.py`
 ```py
 # File: ingest-service/app/core/config.py
 import sys
@@ -231,7 +231,7 @@ except Exception as e:
     sys.exit("FATAL: Invalid configuration. Check logs.")
 ```
 
-## File: `app/core/logging_config.py`
+## File: `app\core\logging_config.py`
 ```py
 import logging
 import sys
@@ -310,7 +310,7 @@ def setup_logging():
     log.info("Logging configured", log_level=settings.LOG_LEVEL, is_celery_worker=is_celery_worker)
 ```
 
-## File: `app/main.py`
+## File: `app\main.py`
 ```py
 # File: ingest-service/app/main.py
 import time
@@ -365,12 +365,12 @@ async def health_check():
     return {"status": "healthy"}
 ```
 
-## File: `app/models/__init__.py`
+## File: `app\models\__init__.py`
 ```py
 
 ```
 
-## File: `app/models/domain.py`
+## File: `app\models\domain.py`
 ```py
 # ingest-service/app/models/domain.py
 import uuid
@@ -410,12 +410,12 @@ class DocumentChunkData(BaseModel):
     vector_status: ChunkVectorStatus = ChunkVectorStatus.PENDING
 ```
 
-## File: `app/services/__init__.py`
+## File: `app\services\__init__.py`
 ```py
 
 ```
 
-## File: `app/services/kafka_producer.py`
+## File: `app\services\kafka_producer.py`
 ```py
 # File: app/services/kafka_producer.py
 import json
@@ -490,7 +490,7 @@ class KafkaProducerClient:
         self.log.info("Kafka producer flushed.")
 ```
 
-## File: `app/services/s3_client.py`
+## File: `app\services\s3_client.py`
 ```py
 # File: app/services/s3_client.py
 import boto3

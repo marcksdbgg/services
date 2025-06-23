@@ -36,17 +36,17 @@ app/
 
 # Codebase del Microservicio embedding-service: `app`
 
-## File: `app/__init__.py`
+## File: `app\__init__.py`
 ```py
 
 ```
 
-## File: `app/api/v1/__init__.py`
+## File: `app\api\v1\__init__.py`
 ```py
 
 ```
 
-## File: `app/api/v1/schemas.py`
+## File: `app\api\v1\schemas.py`
 ```py
 from typing import Optional
 from pydantic import BaseModel
@@ -59,12 +59,12 @@ class ModelInfo(BaseModel):
 
 ```
 
-## File: `app/application/__init__.py`
+## File: `app\application\__init__.py`
 ```py
 
 ```
 
-## File: `app/application/ports/__init__.py`
+## File: `app\application\ports\__init__.py`
 ```py
 # embedding-service/app/application/ports/__init__.py
 from .embedding_model_port import EmbeddingModelPort
@@ -72,7 +72,7 @@ from .embedding_model_port import EmbeddingModelPort
 __all__ = ["EmbeddingModelPort"]
 ```
 
-## File: `app/application/ports/embedding_model_port.py`
+## File: `app\application\ports\embedding_model_port.py`
 ```py
 # embedding-service/app/application/ports/embedding_model_port.py
 import abc
@@ -120,12 +120,12 @@ class EmbeddingModelPort(abc.ABC):
         raise NotImplementedError
 ```
 
-## File: `app/application/use_cases/__init__.py`
+## File: `app\application\use_cases\__init__.py`
 ```py
 
 ```
 
-## File: `app/application/use_cases/embed_texts_use_case.py`
+## File: `app\application\use_cases\embed_texts_use_case.py`
 ```py
 # embedding-service/app/application/use_cases/embed_texts_use_case.py
 import structlog
@@ -183,12 +183,12 @@ class EmbedTextsUseCase:
             raise
 ```
 
-## File: `app/core/__init__.py`
+## File: `app\core\__init__.py`
 ```py
 
 ```
 
-## File: `app/core/config.py`
+## File: `app\core\config.py`
 ```py
 # File: embedding-service/app/core/config.py
 import sys
@@ -253,7 +253,7 @@ except Exception as e:
     sys.exit("FATAL: Invalid configuration. Check logs.")
 ```
 
-## File: `app/core/logging_config.py`
+## File: `app\core\logging_config.py`
 ```py
 # embedding-service/app/core/logging_config.py
 import logging
@@ -318,13 +318,13 @@ def setup_logging():
     log.info("Logging configured for Embedding Service", log_level=settings.LOG_LEVEL)
 ```
 
-## File: `app/domain/__init__.py`
+## File: `app\domain\__init__.py`
 ```py
 # Domain package for embedding-service
 
 ```
 
-## File: `app/domain/models.py`
+## File: `app\domain\models.py`
 ```py
 # embedding-service/app/domain/models.py
 from pydantic import BaseModel, Field
@@ -340,19 +340,19 @@ from typing import List, Dict, Any, Optional
 #     source_text_preview: str # For context
 ```
 
-## File: `app/infrastructure/__init__.py`
+## File: `app\infrastructure\__init__.py`
 ```py
 # Infrastructure package for embedding-service
 
 ```
 
-## File: `app/infrastructure/embedding_models/__init__.py`
+## File: `app\infrastructure\embedding_models\__init__.py`
 ```py
 # Models subpackage for infrastructure
 
 ```
 
-## File: `app/infrastructure/embedding_models/fastembed_adapter.py`
+## File: `app\infrastructure\embedding_models\fastembed_adapter.py`
 ```py
 # embedding-service/app/infrastructure/embedding_models/fastembed_adapter.py
 import structlog
@@ -492,7 +492,7 @@ class FastEmbedAdapter(EmbeddingModelPort):
             return False, f"FastEmbed model '{self._model_name}' not loaded."
 ```
 
-## File: `app/infrastructure/embedding_models/openai_adapter.py`
+## File: `app\infrastructure\embedding_models\openai_adapter.py`
 ```py
 # File: embedding-service/app/infrastructure/embedding_models/openai_adapter.py
 import structlog
@@ -658,7 +658,7 @@ class OpenAIAdapter(EmbeddingModelPort):
             return False, "OpenAI client not initialized."
 ```
 
-## File: `app/main.py`
+## File: `app\main.py`
 ```py
 # File: embedding-service/app/main.py
 import sys
@@ -765,12 +765,12 @@ if __name__ == "__main__":
     main()
 ```
 
-## File: `app/services/__init__.py`
+## File: `app\services\__init__.py`
 ```py
 
 ```
 
-## File: `app/services/kafka_clients.py`
+## File: `app\services\kafka_clients.py`
 ```py
 # File: app/services/kafka_clients.py
 import json

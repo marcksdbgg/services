@@ -437,10 +437,11 @@ async def proxy_ingest_service_generic(
 # File: pyproject.toml
 [tool.poetry]
 name = "atenex-api-gateway"
-version = "2.0.0-refactor"
+version = "2.0.0"
 description = "Atenex API Gateway (Simplified Proxy for Kafka/Flink Demo)"
 authors = ["Atenex Team <dev@atenex.com>"]
 readme = "README.md"
+package-mode = false 
 
 [tool.poetry.dependencies]
 python = "^3.10"
@@ -463,10 +464,10 @@ structlog = "^24.1.0"
 # Dependencia necesaria para httpx[http2]
 h2 = "^4.1.0"
 
+
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.4"
 pytest-asyncio = "^0.21.1"
-pytest-httpx = "^0.29.0"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

@@ -44,22 +44,22 @@ app/
 
 # Codebase del Microservicio docproc-service: `app`
 
-## File: `app/__init__.py`
+## File: `app\__init__.py`
 ```py
 
 ```
 
-## File: `app/application/__init__.py`
+## File: `app\application\__init__.py`
 ```py
 
 ```
 
-## File: `app/application/ports/__init__.py`
+## File: `app\application\ports\__init__.py`
 ```py
 
 ```
 
-## File: `app/application/ports/chunking_port.py`
+## File: `app\application\ports\chunking_port.py`
 ```py
 from abc import ABC, abstractmethod
 from typing import List
@@ -97,7 +97,7 @@ class ChunkingPort(ABC):
         pass
 ```
 
-## File: `app/application/ports/extraction_port.py`
+## File: `app\application\ports\extraction_port.py`
 ```py
 from abc import ABC, abstractmethod
 from typing import List, Tuple, Union, Any, Dict # <--- AÑADIR Dict AQUÍ
@@ -143,12 +143,12 @@ class ExtractionPort(ABC):
         pass
 ```
 
-## File: `app/application/use_cases/__init__.py`
+## File: `app\application\use_cases\__init__.py`
 ```py
 
 ```
 
-## File: `app/application/use_cases/process_document_use_case.py`
+## File: `app\application\use_cases\process_document_use_case.py`
 ```py
 import time
 import structlog
@@ -284,12 +284,12 @@ class ProcessDocumentUseCase:
 
 ```
 
-## File: `app/core/__init__.py`
+## File: `app\core\__init__.py`
 ```py
 
 ```
 
-## File: `app/core/config.py`
+## File: `app\core\config.py`
 ```py
 # File: app/core/config.py
 import sys
@@ -369,7 +369,7 @@ except ValidationError as e:
     sys.exit(1)
 ```
 
-## File: `app/core/logging_config.py`
+## File: `app\core\logging_config.py`
 ```py
 import logging
 import sys
@@ -448,7 +448,7 @@ def setup_logging():
     log.info("Logging configured", log_level=settings.LOG_LEVEL)
 ```
 
-## File: `app/dependencies.py`
+## File: `app\dependencies.py`
 ```py
 # File: app/dependencies.py
 from app.application.ports.extraction_port import ExtractionPort
@@ -508,12 +508,12 @@ def get_process_document_use_case() -> ProcessDocumentUseCase:
     return process_document_use_case
 ```
 
-## File: `app/domain/__init__.py`
+## File: `app\domain\__init__.py`
 ```py
 
 ```
 
-## File: `app/domain/models.py`
+## File: `app\domain\models.py`
 ```py
 from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field
@@ -575,17 +575,17 @@ class ProcessResponse(BaseModel):
         }
 ```
 
-## File: `app/infrastructure/__init__.py`
+## File: `app\infrastructure\__init__.py`
 ```py
 
 ```
 
-## File: `app/infrastructure/chunkers/__init__.py`
+## File: `app\infrastructure\chunkers\__init__.py`
 ```py
 
 ```
 
-## File: `app/infrastructure/chunkers/default_chunker_adapter.py`
+## File: `app\infrastructure\chunkers\default_chunker_adapter.py`
 ```py
 import structlog
 from typing import List
@@ -654,7 +654,7 @@ class DefaultChunkerAdapter(ChunkingPort):
         return chunks
 ```
 
-## File: `app/infrastructure/extractors/__init__.py`
+## File: `app\infrastructure\extractors\__init__.py`
 ```py
 # File: app/infrastructure/extractors/__init__.py
 from .base_extractor import BaseExtractorAdapter
@@ -678,7 +678,7 @@ __all__ = [
 ]
 ```
 
-## File: `app/infrastructure/extractors/base_extractor.py`
+## File: `app\infrastructure\extractors\base_extractor.py`
 ```py
 import structlog
 from app.application.ports.extraction_port import ExtractionPort, ExtractionError
@@ -694,7 +694,7 @@ class BaseExtractorAdapter(ExtractionPort):
         raise ExtractionError(f"Error extracting with {adapter_name} for {filename}: {e}") from e
 ```
 
-## File: `app/infrastructure/extractors/composite_extractor_adapter.py`
+## File: `app\infrastructure\extractors\composite_extractor_adapter.py`
 ```py
 # File: app/infrastructure/extractors/composite_extractor_adapter.py
 from typing import Dict, Any, Tuple, Union, List
@@ -758,7 +758,7 @@ class CompositeExtractorAdapter(BaseExtractorAdapter):
             raise self._handle_extraction_error(e, filename, f"CompositeAdapter -> {type(extractor).__name__}")
 ```
 
-## File: `app/infrastructure/extractors/docx_adapter.py`
+## File: `app\infrastructure\extractors\docx_adapter.py`
 ```py
 import io
 import docx  # python-docx
@@ -803,7 +803,7 @@ class DocxAdapter(BaseExtractorAdapter):
             raise self._handle_extraction_error(e, filename, "DocxAdapter")
 ```
 
-## File: `app/infrastructure/extractors/excel_adapter.py`
+## File: `app\infrastructure\extractors\excel_adapter.py`
 ```py
 import io
 import pandas as pd
@@ -881,7 +881,7 @@ class ExcelAdapter(BaseExtractorAdapter):
             raise self._handle_extraction_error(e, filename, "ExcelAdapter")
 ```
 
-## File: `app/infrastructure/extractors/html_adapter.py`
+## File: `app\infrastructure\extractors\html_adapter.py`
 ```py
 from bs4 import BeautifulSoup
 import structlog
@@ -927,7 +927,7 @@ class HtmlAdapter(BaseExtractorAdapter):
             raise self._handle_extraction_error(e, filename, "HtmlAdapter")
 ```
 
-## File: `app/infrastructure/extractors/md_adapter.py`
+## File: `app\infrastructure\extractors\md_adapter.py`
 ```py
 import markdown
 import html2text # To convert HTML generated from Markdown to clean text
@@ -972,7 +972,7 @@ class MdAdapter(BaseExtractorAdapter):
             raise self._handle_extraction_error(e, filename, "MdAdapter")
 ```
 
-## File: `app/infrastructure/extractors/pdf_adapter.py`
+## File: `app\infrastructure\extractors\pdf_adapter.py`
 ```py
 import fitz  # PyMuPDF
 import structlog
@@ -1026,7 +1026,7 @@ class PdfAdapter(BaseExtractorAdapter):
             raise self._handle_extraction_error(e, filename, "PdfAdapter")
 ```
 
-## File: `app/infrastructure/extractors/txt_adapter.py`
+## File: `app\infrastructure\extractors\txt_adapter.py`
 ```py
 import structlog
 from typing import Tuple, Dict, Any, Union, List
@@ -1079,9 +1079,9 @@ class TxtAdapter(BaseExtractorAdapter):
             raise e
 ```
 
-## File: `app/main.py`
+## File: `app\main.py`
 ```py
-# File: app/main.py (Reemplazado)
+# File: docproc-service/app/main.py
 import sys
 import os
 import json
@@ -1092,14 +1092,15 @@ import asyncio
 import structlog
 from typing import Dict, Any, Optional
 
-# Configurar logging primero que nada
+from dotenv import load_dotenv
+load_dotenv()
+
 from app.core.logging_config import setup_logging
 setup_logging()
 
 from app.core.config import settings
 from app.services.kafka_clients import KafkaConsumerClient, KafkaProducerClient
 from app.services.s3_client import S3Client, S3ClientError
-
 from app.application.use_cases.process_document_use_case import ProcessDocumentUseCase
 from app.dependencies import get_process_document_use_case
 
@@ -1151,10 +1152,11 @@ def process_message(msg, s3_client: S3Client, use_case: ProcessDocumentUseCase, 
 
         s3_path = event_data.get("s3_path")
         document_id = event_data.get("document_id")
-        content_type = guess_content_type(s3_path) # Inferir de la ruta/nombre de archivo
+        company_id = event_data.get("company_id") # <-- CORRECCIÓN: Capturar company_id
+        content_type = guess_content_type(s3_path)
 
-        if not all([s3_path, document_id, content_type]):
-            msg_log.error("Message is missing required fields: s3_path, document_id, or content_type cannot be inferred.")
+        if not all([s3_path, document_id, content_type, company_id]):
+            msg_log.error("Message is missing required fields.", missing_fields=[k for k,v in {'s3_path':s3_path, 'document_id':document_id, 'company_id':company_id, 'content_type':content_type}.items() if not v])
             return
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1164,15 +1166,14 @@ def process_message(msg, s3_client: S3Client, use_case: ProcessDocumentUseCase, 
 
         msg_log.info("File downloaded from S3, proceeding with processing.", file_size=len(file_bytes))
         
-        # Ejecutar el caso de uso asíncrono
         process_response_data = asyncio.run(use_case.execute(
             file_bytes=file_bytes,
             original_filename=os.path.basename(s3_path),
             content_type=content_type,
-            document_id_trace=document_id
+            document_id_trace=document_id,
+            company_id_trace=company_id # <-- CORRECCIÓN: Pasar company_id al caso de uso
         ))
 
-        # Producir un mensaje por cada chunk
         chunks = process_response_data.chunks
         msg_log.info(f"Document processed. Found {len(chunks)} chunks to produce.")
         
@@ -1183,12 +1184,13 @@ def process_message(msg, s3_client: S3Client, use_case: ProcessDocumentUseCase, 
             output_payload = {
                 "chunk_id": chunk_id,
                 "document_id": document_id,
+                "company_id": company_id, # <-- CORRECCIÓN: Incluir company_id en el payload de salida
                 "text": chunk.text,
                 "page": page_number if page_number is not None else -1
             }
             producer.produce(
                 topic=settings.KAFKA_OUTPUT_TOPIC,
-                key=document_id, # Particionar por document_id para mantener el orden de los chunks
+                key=document_id,
                 value=output_payload
             )
 
@@ -1216,12 +1218,12 @@ if __name__ == "__main__":
     main()
 ```
 
-## File: `app/services/__init__.py`
+## File: `app\services\__init__.py`
 ```py
 
 ```
 
-## File: `app/services/kafka_clients.py`
+## File: `app\services\kafka_clients.py`
 ```py
 # File: app/services/kafka_clients.py
 import json
@@ -1309,7 +1311,7 @@ class KafkaConsumerClient:
         self.consumer.close()
 ```
 
-## File: `app/services/s3_client.py`
+## File: `app\services\s3_client.py`
 ```py
 # File: app/services/s3_client.py
 import boto3

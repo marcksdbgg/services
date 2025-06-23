@@ -22,3 +22,26 @@ Verificar su existencia:
 Para el ingest o api:
 
 poetry run uvicorn app.main:app --host 0.0.0.0 --port 8001
+
+Politica del bucket:
+
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "PublicWriteAccessForDev",
+            "Effect": "Allow",
+            "Principal": "*",
+            "Action": "s3:PutObject",
+            "Resource": "arn:aws:s3:::sasde/*"
+        },
+        {
+            "Sid": "PublicGetAccessForDev",
+            "Effect": "Allow",
+            "Principal": "*",
+            "Action": "s3:GetObject",
+            "Resource": "arn:aws:s3:::sasde/*"
+        }
+    ]
+}
+
