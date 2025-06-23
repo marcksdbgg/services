@@ -23,6 +23,10 @@ Para el ingest o api:
 
 poetry run uvicorn app.main:app --host 0.0.0.0 --port 8001
 
+Para el docproc:
+
+poetry run python -m app.main
+
 Politica del bucket:
 
 {
