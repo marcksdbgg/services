@@ -11,9 +11,9 @@ Terminal 2: kafka Broker
 
 Crear topics:
 
-/opt/kafka/bin/kafka-topics.sh --create --topic documents.raw --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1
-/opt/kafka/bin/kafka-topics.sh --create --topic chunks.processed --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1
-/opt/kafka/bin/kafka-topics.sh --create --topic embeddings.ready --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1
+bin/kafka-topics.sh --create --topic documents.raw --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1
+bin/kafka-topics.sh --create --topic chunks.processed --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1
+bin/kafka-topics.sh --create --topic embeddings.ready --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1
 
 Verificar su existencia:
 

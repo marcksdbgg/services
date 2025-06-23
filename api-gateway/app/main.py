@@ -53,19 +53,14 @@ app = FastAPI(
 )
 
 # --- Middlewares ---
-allowed_origins_set: Set[str] = {
-    "http://localhost:3000", # Frontend dev
-    "http://127.0.0.1:3000",
-}
-if settings.VERCEL_FRONTEND_URL:
-    allowed_origins_set.add(settings.VERCEL_FRONTEND_URL)
-
+# CORRECCIÓN: Se simplifica la configuración de CORS para permitir todos los orígenes.
+# Esto es más robusto para entornos de desarrollo con Vercel y Ngrok.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=list(allowed_origins_set),
+    allow_origins=["*"],  # Permitir cualquier origen
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["*"],  # Permitir todos los métodos (GET, POST, etc.)
+    allow_headers=["*"],  # Permitir todas las cabeceras
     expose_headers=["X-Request-ID", "X-Process-Time"],
 )
 
