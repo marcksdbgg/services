@@ -15,7 +15,8 @@ app/
 ├── core
 │   ├── __init__.py
 │   ├── config.py
-│   └── logging_config.py
+│   ├── logging_config.py
+│   └── metrics.py
 ├── dependencies.py
 ├── domain
 │   ├── __init__.py
@@ -446,6 +447,49 @@ def setup_logging():
 
     log = structlog.get_logger(settings.PROJECT_NAME)
     log.info("Logging configured", log_level=settings.LOG_LEVEL)
+```
+
+## File: `app\core\metrics.py`
+```py
+# File: docproc-service/app/core/metrics.py
+from prometheus_client import Counter, Histogram
+
+MESSAGES_CONSUMED_TOTAL = Counter(
+    "docproc_messages_consumed_total",
+    "Total number of Kafka messages consumed.",
+    ["topic", "status"]
+)
+
+PROCESSING_DURATION_SECONDS = Histogram(
+    "docproc_processing_duration_seconds",
+    "Time taken to process a single document.",
+    ["company_id", "content_type"],
+    buckets=[0.1, 0.5, 1, 2, 5, 10, 30, 60]
+)
+
+CHUNKS_PRODUCED_TOTAL = Counter(
+    "docproc_chunks_produced_total",
+    "Total number of chunks produced to Kafka.",
+    ["company_id", "content_type"]
+)
+
+PROCESSING_ERRORS_TOTAL = Counter(
+    "docproc_processing_errors_total",
+    "Total number of errors during processing.",
+    ["stage"]
+)
+
+S3_DOWNLOAD_DURATION_SECONDS = Histogram(
+    "docproc_s3_download_duration_seconds",
+    "Time taken to download a file from S3.",
+    buckets=[0.1, 0.5, 1, 2, 5, 10]
+)
+
+KAFKA_MESSAGES_PRODUCED_TOTAL = Counter(
+    "docproc_kafka_messages_produced_total",
+    "Total number of messages produced to Kafka.",
+    ["topic", "status"]
+)
 ```
 
 ## File: `app\dependencies.py`
@@ -1095,6 +1139,8 @@ from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 load_dotenv()
 
+from prometheus_client import start_http_server
+
 from app.core.logging_config import setup_logging
 setup_logging()
 
@@ -1103,6 +1149,12 @@ from app.services.kafka_clients import KafkaConsumerClient, KafkaProducerClient
 from app.services.s3_client import S3Client, S3ClientError
 from app.application.use_cases.process_document_use_case import ProcessDocumentUseCase
 from app.dependencies import get_process_document_use_case
+from app.core.metrics import (
+    MESSAGES_CONSUMED_TOTAL,
+    PROCESSING_DURATION_SECONDS,
+    CHUNKS_PRODUCED_TOTAL,
+    PROCESSING_ERRORS_TOTAL,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -1111,6 +1163,10 @@ def main():
     log.info("Initializing DocProc Worker...", config=settings.model_dump(exclude=['SUPPORTED_CONTENT_TYPES']))
 
     try:
+        # Start Prometheus metrics server
+        start_http_server(8003)
+        log.info("Prometheus metrics server started on port 8003.")
+
         consumer = KafkaConsumerClient(topics=[settings.KAFKA_INPUT_TOPIC])
         producer = KafkaProducerClient()
         s3_client = S3Client()
@@ -1138,70 +1194,79 @@ def main():
 
 def process_message(msg, s3_client: S3Client, use_case: ProcessDocumentUseCase, producer: KafkaProducerClient):
     """Procesa un único mensaje de Kafka."""
+    event_data = None
     try:
         event_data = json.loads(msg.value().decode('utf-8'))
-        log_context = {
-            "kafka_topic": msg.topic(),
-            "kafka_partition": msg.partition(),
-            "kafka_offset": msg.offset(),
-            "document_id": event_data.get("document_id"),
-            "company_id": event_data.get("company_id"),
-        }
-        msg_log = log.bind(**log_context)
-        msg_log.info("Received new message to process.")
-
-        s3_path = event_data.get("s3_path")
-        document_id = event_data.get("document_id")
-        company_id = event_data.get("company_id") # <-- CORRECCIÓN: Capturar company_id
-        content_type = guess_content_type(s3_path)
-
-        if not all([s3_path, document_id, content_type, company_id]):
-            msg_log.error("Message is missing required fields.", missing_fields=[k for k,v in {'s3_path':s3_path, 'document_id':document_id, 'company_id':company_id, 'content_type':content_type}.items() if not v])
-            return
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            local_path = pathlib.Path(temp_dir) / os.path.basename(s3_path)
-            s3_client.download_file_sync(s3_path, str(local_path))
-            file_bytes = local_path.read_bytes()
-
-        msg_log.info("File downloaded from S3, proceeding with processing.", file_size=len(file_bytes))
-        
-        process_response_data = asyncio.run(use_case.execute(
-            file_bytes=file_bytes,
-            original_filename=os.path.basename(s3_path),
-            content_type=content_type,
-            document_id_trace=document_id,
-            company_id_trace=company_id # <-- CORRECCIÓN: Pasar company_id al caso de uso
-        ))
-
-        chunks = process_response_data.chunks
-        msg_log.info(f"Document processed. Found {len(chunks)} chunks to produce.")
-        
-        for i, chunk in enumerate(chunks):
-            chunk_id = str(uuid.uuid4())
-            page_number = chunk.source_metadata.page_number
-            
-            output_payload = {
-                "chunk_id": chunk_id,
-                "document_id": document_id,
-                "company_id": company_id, # <-- CORRECCIÓN: Incluir company_id en el payload de salida
-                "text": chunk.text,
-                "page": page_number if page_number is not None else -1
-            }
-            producer.produce(
-                topic=settings.KAFKA_OUTPUT_TOPIC,
-                key=document_id,
-                value=output_payload
-            )
-
-        msg_log.info("All chunks produced to output topic.", num_chunks=len(chunks))
-
+        MESSAGES_CONSUMED_TOTAL.labels(topic=msg.topic(), status="success").inc()
     except json.JSONDecodeError:
         log.error("Failed to decode Kafka message value", raw_value=msg.value())
-    except S3ClientError as e:
-        log.error("Failed to process message due to S3 error", error=str(e), exc_info=True)
-    except Exception as e:
-        log.error("Unhandled error processing message", error=str(e), exc_info=True)
+        MESSAGES_CONSUMED_TOTAL.labels(topic=msg.topic(), status="failure").inc()
+        return
+
+    log_context = {
+        "kafka_topic": msg.topic(),
+        "kafka_partition": msg.partition(),
+        "kafka_offset": msg.offset(),
+        "document_id": event_data.get("document_id"),
+        "company_id": event_data.get("company_id"),
+    }
+    msg_log = log.bind(**log_context)
+    msg_log.info("Received new message to process.")
+
+    s3_path = event_data.get("s3_path")
+    document_id = event_data.get("document_id")
+    company_id = event_data.get("company_id")
+    content_type = event_data.get("content_type") or guess_content_type(s3_path)
+
+    if not all([s3_path, document_id, content_type, company_id]):
+        msg_log.error("Message is missing required fields.")
+        PROCESSING_ERRORS_TOTAL.labels(stage="validation").inc()
+        return
+
+    with PROCESSING_DURATION_SECONDS.labels(company_id=company_id, content_type=content_type).time():
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                local_path = pathlib.Path(temp_dir) / os.path.basename(s3_path)
+                s3_client.download_file_sync(s3_path, str(local_path))
+                file_bytes = local_path.read_bytes()
+
+            msg_log.info("File downloaded from S3, proceeding with processing.", file_size=len(file_bytes))
+            
+            process_response_data = asyncio.run(use_case.execute(
+                file_bytes=file_bytes,
+                original_filename=os.path.basename(s3_path),
+                content_type=content_type,
+                document_id_trace=document_id,
+                company_id_trace=company_id
+            ))
+
+            chunks = process_response_data.chunks
+            msg_log.info(f"Document processed. Found {len(chunks)} chunks to produce.")
+            CHUNKS_PRODUCED_TOTAL.labels(company_id=company_id, content_type=content_type).inc(len(chunks))
+            
+            for i, chunk in enumerate(chunks):
+                chunk_id = str(uuid.uuid4())
+                page_number = chunk.source_metadata.page_number
+                
+                output_payload = {
+                    "chunk_id": chunk_id,
+                    "document_id": document_id,
+                    "company_id": company_id,
+                    "text": chunk.text,
+                    "page": page_number if page_number is not None else -1
+                }
+                producer.produce(
+                    topic=settings.KAFKA_OUTPUT_TOPIC,
+                    key=document_id,
+                    value=output_payload
+                )
+            msg_log.info("All chunks produced to output topic.", num_chunks=len(chunks))
+        except S3ClientError as e:
+            msg_log.error("Failed to process message due to S3 error", error=str(e), exc_info=True)
+            PROCESSING_ERRORS_TOTAL.labels(stage="s3_download").inc()
+        except Exception as e:
+            msg_log.error("Unhandled error processing message", error=str(e), exc_info=True)
+            PROCESSING_ERRORS_TOTAL.labels(stage="unknown").inc()
 
 
 def guess_content_type(filename: str) -> Optional[str]:
@@ -1232,6 +1297,7 @@ from confluent_kafka import Consumer, Producer, KafkaError, KafkaException
 from typing import Optional, Generator, Any, Dict
 
 from app.core.config import settings
+from app.core.metrics import KAFKA_MESSAGES_PRODUCED_TOTAL
 
 log = structlog.get_logger(__name__)
 
@@ -1246,10 +1312,13 @@ class KafkaProducerClient:
         self.log = log.bind(component="KafkaProducerClient")
 
     def _delivery_report(self, err, msg):
+        topic = msg.topic()
         if err is not None:
-            self.log.error(f"Message delivery failed to topic '{msg.topic()}'", error=str(err))
+            self.log.error(f"Message delivery failed to topic '{topic}'", error=str(err))
+            KAFKA_MESSAGES_PRODUCED_TOTAL.labels(topic=topic, status="failure").inc()
         else:
-            self.log.debug(f"Message delivered to {msg.topic()} [{msg.partition()}]")
+            self.log.debug(f"Message delivered to {topic} [{msg.partition()}]")
+            KAFKA_MESSAGES_PRODUCED_TOTAL.labels(topic=topic, status="success").inc()
 
     def produce(self, topic: str, key: str, value: Dict[str, Any]):
         try:
@@ -1261,6 +1330,7 @@ class KafkaProducerClient:
             )
         except KafkaException as e:
             self.log.exception("Failed to produce message", error=str(e))
+            KAFKA_MESSAGES_PRODUCED_TOTAL.labels(topic=topic, status="failure").inc()
             raise
 
     def flush(self, timeout: float = 10.0):
@@ -1322,6 +1392,7 @@ import structlog
 from typing import Optional
 
 from app.core.config import settings
+from app.core.metrics import S3_DOWNLOAD_DURATION_SECONDS
 
 log = structlog.get_logger(__name__)
 
@@ -1346,7 +1417,8 @@ class S3Client:
         """Downloads a file from S3 to a local path (anonymous access)."""
         self.log.info("Downloading file from S3...", object_name=object_name, target_path=download_path)
         try:
-            self.s3_client.download_file(self.bucket_name, object_name, download_path)
+            with S3_DOWNLOAD_DURATION_SECONDS.time():
+                self.s3_client.download_file(self.bucket_name, object_name, download_path)
             self.log.info("File downloaded successfully from S3.", object_name=object_name)
         except ClientError as e:
             code = e.response['Error']['Code']
@@ -1382,6 +1454,9 @@ httpx = "^0.27.0"
 # --- AWS and Kafka Clients ---
 boto3 = "^1.34.0"
 confluent-kafka = "^2.4.0"
+
+# --- Prometheus Metrics Client ---
+prometheus-client = "^0.20.0"
 
 # --- Extraction Libraries (se mantienen) ---
 pymupdf = "^1.25.0"

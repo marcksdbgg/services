@@ -18,7 +18,8 @@ app/
 ├── core
 │   ├── __init__.py
 │   ├── config.py
-│   └── logging_config.py
+│   ├── logging_config.py
+│   └── metrics.py
 ├── domain
 │   ├── __init__.py
 │   └── models.py
@@ -337,6 +338,48 @@ def setup_logging():
     log.info("Logging configured for Embedding Service", log_level=settings.LOG_LEVEL)
 ```
 
+## File: `app\core\metrics.py`
+```py
+# File: embedding-service/app/core/metrics.py
+from prometheus_client import Counter, Histogram
+
+MESSAGES_CONSUMED_TOTAL = Counter(
+    "embedding_messages_consumed_total",
+    "Total number of Kafka messages consumed from a batch.",
+    ["topic", "partition"]
+)
+
+BATCH_PROCESSING_DURATION_SECONDS = Histogram(
+    "embedding_batch_processing_duration_seconds",
+    "Time taken to process a batch of texts.",
+    buckets=[0.1, 0.5, 1, 2, 5, 10, 20, 30]
+)
+
+TEXTS_PROCESSED_TOTAL = Counter(
+    "embedding_texts_processed_total",
+    "Total number of individual texts processed for embedding.",
+    ["company_id"]
+)
+
+OPENAI_API_DURATION_SECONDS = Histogram(
+    "embedding_openai_api_duration_seconds",
+    "Duration of calls to the OpenAI Embedding API.",
+    ["model_name"]
+)
+
+OPENAI_API_ERRORS_TOTAL = Counter(
+    "embedding_openai_api_errors_total",
+    "Total number of errors from the OpenAI API.",
+    ["model_name", "error_type"]
+)
+
+KAFKA_MESSAGES_PRODUCED_TOTAL = Counter(
+    "embedding_kafka_messages_produced_total",
+    "Total number of embedding messages produced to Kafka.",
+    ["topic", "status"]
+)
+```
+
 ## File: `app\domain\__init__.py`
 ```py
 # Domain package for embedding-service
@@ -523,6 +566,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 from app.application.ports.embedding_model_port import EmbeddingModelPort
 from app.core.config import settings
+from app.core.metrics import OPENAI_API_DURATION_SECONDS, OPENAI_API_ERRORS_TOTAL
 
 log = structlog.get_logger(__name__)
 
@@ -541,14 +585,9 @@ class OpenAIAdapter(EmbeddingModelPort):
         self._model_name = settings.OPENAI_EMBEDDING_MODEL_NAME
         self._embedding_dimension = settings.EMBEDDING_DIMENSION
         self._dimensions_override = settings.OPENAI_EMBEDDING_DIMENSIONS_OVERRIDE
-        # Client initialization is deferred to an async method.
         log.info("OpenAIAdapter initialized", model_name=self._model_name, target_dimension=self._embedding_dimension)
 
     async def initialize_model(self):
-        """
-        Initializes the OpenAI client.
-        This should be called during service startup (e.g., lifespan).
-        """
         if self._model_initialized:
             log.debug("OpenAI client already initialized.", model_name=self._model_name)
             return
@@ -570,26 +609,12 @@ class OpenAIAdapter(EmbeddingModelPort):
                 timeout=settings.OPENAI_TIMEOUT_SECONDS,
                 max_retries=0
             )
-
             self._model_initialized = True
             self._initialization_error = None
             duration_ms = (time.perf_counter() - start_time) * 1000
             init_log.info("OpenAI client initialized successfully.", duration_ms=duration_ms)
-
-        except AuthenticationError as e:
-            self._initialization_error = f"OpenAI API Authentication Failed: {e}. Check your API key."
-            init_log.critical(self._initialization_error, exc_info=False)
-            self._client = None
-            self._model_initialized = False
-            raise ConnectionError(self._initialization_error) from e
-        except APIConnectionError as e:
-            self._initialization_error = f"OpenAI API Connection Error: {e}. Check network or OpenAI status."
-            init_log.critical(self._initialization_error, exc_info=True)
-            self._client = None
-            self._model_initialized = False
-            raise ConnectionError(self._initialization_error) from e
         except Exception as e:
-            self._initialization_error = f"Failed to initialize OpenAI client for model '{self._model_name}': {str(e)}"
+            self._initialization_error = f"Failed to initialize OpenAI client: {str(e)}"
             init_log.critical(self._initialization_error, exc_info=True)
             self._client = None
             self._model_initialized = False
@@ -609,13 +634,13 @@ class OpenAIAdapter(EmbeddingModelPort):
     )
     async def embed_texts(self, texts: List[str]) -> List[List[float]]:
         if not self._model_initialized or not self._client:
-            log.error("OpenAI client not initialized. Cannot generate embeddings.", init_error=self._initialization_error)
+            log.error("OpenAI client not initialized.", init_error=self._initialization_error)
             raise ConnectionError("OpenAI embedding model is not available.")
 
         if not texts:
             return []
 
-        embed_log = log.bind(adapter="OpenAIAdapter", action="embed_texts", num_texts=len(texts), model=self._model_name)
+        embed_log = log.bind(adapter="OpenAIAdapter", num_texts=len(texts), model=self._model_name)
         embed_log.debug("Generating embeddings via OpenAI API...")
 
         try:
@@ -627,46 +652,38 @@ class OpenAIAdapter(EmbeddingModelPort):
             if self._dimensions_override is not None:
                 api_params["dimensions"] = self._dimensions_override
 
-            response = await self._client.embeddings.create(**api_params)
+            with OPENAI_API_DURATION_SECONDS.labels(model_name=self._model_name).time():
+                response = await self._client.embeddings.create(**api_params)
 
             if not response.data or not all(item.embedding for item in response.data):
-                embed_log.error("OpenAI API returned no embedding data or empty embeddings.", api_response=response.model_dump_json(indent=2))
                 raise ValueError("OpenAI API returned no valid embedding data.")
 
-            if response.data and response.data[0].embedding:
-                actual_dim = len(response.data[0].embedding)
-                if actual_dim != self._embedding_dimension:
-                    embed_log.warning(
-                        "Dimension mismatch in OpenAI response.",
-                        expected_dim=self._embedding_dimension,
-                        actual_dim=actual_dim,
-                        model_used=response.model
-                    )
-
             embeddings_list = [item.embedding for item in response.data]
-            embed_log.debug("Embeddings generated successfully via OpenAI.", num_embeddings=len(embeddings_list), usage_tokens=response.usage.total_tokens if response.usage else "N/A")
             return embeddings_list
         except AuthenticationError as e:
-            embed_log.error("OpenAI API Authentication Error during embedding", error=str(e))
+            embed_log.error("OpenAI API Authentication Error", error=str(e))
+            OPENAI_API_ERRORS_TOTAL.labels(model_name=self._model_name, error_type="authentication_error").inc()
             raise ConnectionError(f"OpenAI authentication failed: {e}") from e
         except RateLimitError as e:
-            embed_log.error("OpenAI API Rate Limit Exceeded during embedding", error=str(e))
+            embed_log.error("OpenAI API Rate Limit Exceeded", error=str(e))
+            OPENAI_API_ERRORS_TOTAL.labels(model_name=self._model_name, error_type="rate_limit_error").inc()
             raise OpenAIError(f"OpenAI rate limit exceeded: {e}") from e
         except APIConnectionError as e:
-            embed_log.error("OpenAI API Connection Error during embedding", error=str(e))
+            embed_log.error("OpenAI API Connection Error", error=str(e))
+            OPENAI_API_ERRORS_TOTAL.labels(model_name=self._model_name, error_type="connection_error").inc()
             raise OpenAIError(f"OpenAI connection error: {e}") from e
         except OpenAIError as e:
-            embed_log.error(f"OpenAI API Error during embedding: {type(e).__name__}", error=str(e))
+            error_type = type(e).__name__
+            embed_log.error(f"OpenAI API Error: {error_type}", error=str(e))
+            OPENAI_API_ERRORS_TOTAL.labels(model_name=self._model_name, error_type=error_type).inc()
             raise RuntimeError(f"OpenAI API error: {e}") from e
         except Exception as e:
             embed_log.exception("Unexpected error during OpenAI embedding process")
+            OPENAI_API_ERRORS_TOTAL.labels(model_name=self._model_name, error_type="unexpected_error").inc()
             raise RuntimeError(f"Embedding generation failed with unexpected error: {e}") from e
 
     def get_model_info(self) -> Dict[str, Any]:
-        return {
-            "model_name": self._model_name,
-            "dimension": self._embedding_dimension,
-        }
+        return { "model_name": self._model_name, "dimension": self._embedding_dimension }
 
     async def health_check(self) -> Tuple[bool, str]:
         if self._model_initialized and self._client:
@@ -686,7 +703,8 @@ import asyncio
 import structlog
 from typing import Any, List, Generator, Dict
 
-# Configurar logging primero que nada
+from prometheus_client import start_http_server
+
 from app.core.logging_config import setup_logging
 setup_logging()
 
@@ -694,6 +712,11 @@ from app.core.config import settings
 from app.services.kafka_clients import KafkaConsumerClient, KafkaProducerClient, KafkaError
 from app.infrastructure.embedding_models.openai_adapter import OpenAIAdapter
 from app.application.use_cases.embed_texts_use_case import EmbedTextsUseCase
+from app.core.metrics import (
+    MESSAGES_CONSUMED_TOTAL,
+    BATCH_PROCESSING_DURATION_SECONDS,
+    TEXTS_PROCESSED_TOTAL,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -701,6 +724,10 @@ def main():
     """Punto de entrada principal para el worker de embeddings."""
     log.info("Initializing Embedding Worker...")
     try:
+        # Start Prometheus metrics server
+        start_http_server(8002)
+        log.info("Prometheus metrics server started on port 8002.")
+
         openai_adapter = OpenAIAdapter()
         asyncio.run(openai_adapter.initialize_model())
         use_case = EmbedTextsUseCase(embedding_model=openai_adapter)
@@ -738,10 +765,13 @@ def batch_consumer(consumer: KafkaConsumerClient, batch_size: int, batch_timeout
             if msg.error().code() != KafkaError._PARTITION_EOF:
                 log.error("Kafka consumer poll error", error=msg.error())
             continue
+        
+        MESSAGES_CONSUMED_TOTAL.labels(topic=msg.topic(), partition=msg.partition()).inc()
         batch.append(msg)
         if len(batch) >= batch_size:
             yield batch; batch = []
 
+@BATCH_PROCESSING_DURATION_SECONDS.time()
 def process_message_batch(message_batch: List[Any], use_case: EmbedTextsUseCase, producer: KafkaProducerClient):
     batch_log = log.bind(batch_size=len(message_batch))
     texts_to_embed, metadata_list = [], []
@@ -768,13 +798,15 @@ def process_message_batch(message_batch: List[Any], use_case: EmbedTextsUseCase,
 
         for i, vector in enumerate(embeddings):
             meta = metadata_list[i]
+            company_id = meta.get("company_id", "unknown")
             output_payload = {
                 "chunk_id": meta.get("chunk_id"),
                 "document_id": meta.get("document_id"),
-                "company_id": meta.get("company_id"), 
+                "company_id": company_id, 
                 "vector": vector,
             }
             producer.produce(settings.KAFKA_OUTPUT_TOPIC, key=str(meta.get("document_id")), value=output_payload)
+            TEXTS_PROCESSED_TOTAL.labels(company_id=company_id).inc()
         
         batch_log.info(f"Processed and produced {len(embeddings)} embeddings.")
     except Exception as e:
@@ -798,6 +830,7 @@ from confluent_kafka import Consumer, Producer, KafkaError, KafkaException
 from typing import Optional, Generator, Any, Dict
 
 from app.core.config import settings
+from app.core.metrics import KAFKA_MESSAGES_PRODUCED_TOTAL
 
 log = structlog.get_logger(__name__)
 
@@ -812,10 +845,13 @@ class KafkaProducerClient:
         self.log = log.bind(component="KafkaProducerClient")
 
     def _delivery_report(self, err, msg):
+        topic = msg.topic()
         if err is not None:
-            self.log.error(f"Message delivery failed to topic '{msg.topic()}'", key=msg.key().decode('utf-8'), error=str(err))
+            self.log.error(f"Message delivery failed to topic '{topic}'", key=msg.key().decode('utf-8'), error=str(err))
+            KAFKA_MESSAGES_PRODUCED_TOTAL.labels(topic=topic, status="failure").inc()
         else:
-            self.log.debug(f"Message delivered to {msg.topic()} [{msg.partition()}]")
+            self.log.debug(f"Message delivered to {topic} [{msg.partition()}]")
+            KAFKA_MESSAGES_PRODUCED_TOTAL.labels(topic=topic, status="success").inc()
 
     def produce(self, topic: str, key: str, value: Dict[str, Any]):
         try:
@@ -827,6 +863,7 @@ class KafkaProducerClient:
             )
         except KafkaException as e:
             self.log.exception("Failed to produce message", error=str(e))
+            KAFKA_MESSAGES_PRODUCED_TOTAL.labels(topic=topic, status="failure").inc()
             raise
 
     def flush(self, timeout: float = 10.0):
@@ -899,6 +936,9 @@ openai = "^1.14.0"
 
 # --- Kafka Client ---
 confluent-kafka = "^2.4.0"
+
+# --- Prometheus Metrics Client ---
+prometheus-client = "^0.20.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.4"

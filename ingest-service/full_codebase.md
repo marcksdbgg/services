@@ -14,7 +14,8 @@ app/
 ├── core
 │   ├── __init__.py
 │   ├── config.py
-│   └── logging_config.py
+│   ├── logging_config.py
+│   └── metrics.py
 ├── main.py
 ├── models
 │   ├── __init__.py
@@ -64,6 +65,7 @@ from app.core.config import settings
 from app.api.v1.schemas import IngestResponse
 from app.services.s3_client import S3Client, S3ClientError
 from app.services.kafka_producer import KafkaProducerClient, KafkaException
+from app.core.metrics import UPLOADS_TOTAL, UPLOAD_FILE_SIZE_BYTES
 
 log = structlog.get_logger(__name__)
 router = APIRouter()
@@ -90,12 +92,14 @@ async def upload_document(
     s3_client: S3Client = Depends(get_s3_client),
     kafka_producer: KafkaProducerClient = Depends(get_kafka_producer),
 ):
-    company_id = request.headers.get("X-Company-ID", "default-company") # Usar un valor por defecto si no viene
+    company_id = request.headers.get("X-Company-ID", "default-company")
+    content_type = file.content_type
     
-    endpoint_log = log.bind(company_id=company_id, filename=file.filename)
+    endpoint_log = log.bind(company_id=company_id, filename=file.filename, content_type=content_type)
     endpoint_log.info("Document upload request received.")
 
-    if file.content_type not in settings.SUPPORTED_CONTENT_TYPES:
+    if content_type not in settings.SUPPORTED_CONTENT_TYPES:
+        UPLOADS_TOTAL.labels(company_id=company_id, content_type=content_type, status="error_client").inc()
         raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="Unsupported file type")
 
     document_id = str(uuid.uuid4())
@@ -104,12 +108,15 @@ async def upload_document(
     
     try:
         file_content = await file.read()
-        await s3_client.upload_file_async(s3_path, file_content, file.content_type)
+        UPLOAD_FILE_SIZE_BYTES.labels(company_id=company_id, content_type=content_type).observe(len(file_content))
+        
+        await s3_client.upload_file_async(s3_path, file_content, content_type)
         
         kafka_payload = {
             "document_id": document_id,
             "company_id": company_id,
-            "s3_path": s3_path
+            "s3_path": s3_path,
+            "content_type": content_type # Add content_type for consumer
         }
         kafka_producer.produce(
             topic=settings.KAFKA_DOCUMENTS_RAW_TOPIC,
@@ -117,9 +124,11 @@ async def upload_document(
             value=kafka_payload
         )
         endpoint_log.info("File uploaded to S3 and message produced to Kafka.", s3_path=s3_path)
+        UPLOADS_TOTAL.labels(company_id=company_id, content_type=content_type, status="success").inc()
 
     except (S3ClientError, KafkaException) as e:
         endpoint_log.exception("Error during S3 upload or Kafka production", error=str(e))
+        UPLOADS_TOTAL.labels(company_id=company_id, content_type=content_type, status="error_server").inc()
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to process file upload.")
     finally:
         await file.close()
@@ -310,6 +319,39 @@ def setup_logging():
     log.info("Logging configured", log_level=settings.LOG_LEVEL, is_celery_worker=is_celery_worker)
 ```
 
+## File: `app\core\metrics.py`
+```py
+# File: ingest-service/app/core/metrics.py
+from prometheus_client import Counter, Histogram
+
+# General metrics
+UPLOADS_TOTAL = Counter(
+    "ingest_uploads_total",
+    "Total number of file upload attempts.",
+    ["company_id", "content_type", "status"]
+)
+
+UPLOAD_FILE_SIZE_BYTES = Histogram(
+    "ingest_upload_file_size_bytes",
+    "Size of uploaded files in bytes.",
+    ["company_id", "content_type"],
+    buckets=(1024*10, 1024*50, 1024*100, 1024*512, 1024*1024, 1024*1024*5, 1024*1024*10)
+)
+
+REQUEST_PROCESSING_DURATION_SECONDS = Histogram(
+    "ingest_request_processing_duration_seconds",
+    "Time taken to process an HTTP request.",
+    ["method", "path"]
+)
+
+# Kafka metrics
+KAFKA_MESSAGES_PRODUCED_TOTAL = Counter(
+    "ingest_kafka_messages_produced_total",
+    "Total number of messages produced to Kafka.",
+    ["topic", "status"]
+)
+```
+
 ## File: `app\main.py`
 ```py
 # File: ingest-service/app/main.py
@@ -319,6 +361,7 @@ import structlog
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status as fastapi_status
 from fastapi.responses import JSONResponse
+from prometheus_client import make_asgi_app
 
 from app.core.logging_config import setup_logging
 setup_logging()
@@ -326,6 +369,7 @@ setup_logging()
 from app.core.config import settings
 from app.api.v1.endpoints import ingest
 from app.services.kafka_producer import KafkaProducerClient
+from app.core.metrics import REQUEST_PROCESSING_DURATION_SECONDS
 
 log = structlog.get_logger(__name__)
 
@@ -347,21 +391,34 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Mount the Prometheus metrics app
+metrics_app = make_asgi_app()
+app.mount("/metrics", metrics_app)
+
+
 @app.middleware("http")
-async def add_request_context(request: Request, call_next):
+async def add_request_context_and_metrics(request: Request, call_next):
     start_time = time.perf_counter()
     request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
+    
+    # Exclude metrics endpoint from request logging and metrics
+    if request.url.path == "/metrics":
+        return await call_next(request)
+        
     structlog.contextvars.bind_contextvars(request_id=request_id)
+    
     response = await call_next(request)
-    process_time = (time.perf_counter() - start_time) * 1000
-    log.info("Request processed", method=request.method, path=request.url.path, status_code=response.status_code, duration_ms=round(process_time, 2))
+    
+    process_time = time.perf_counter() - start_time
+    REQUEST_PROCESSING_DURATION_SECONDS.labels(method=request.method, path=request.url.path).observe(process_time)
+    
+    log.info("Request processed", method=request.method, path=request.url.path, status_code=response.status_code, duration_ms=round(process_time * 1000, 2))
     return response
 
 app.include_router(ingest.router, prefix=settings.API_V1_STR, tags=["Ingestion"])
 
 @app.get("/health", tags=["Health Check"])
 async def health_check():
-    # El health check ya no depende de la base de datos
     return {"status": "healthy"}
 ```
 
@@ -424,6 +481,7 @@ from confluent_kafka import Producer, KafkaException
 from typing import Optional
 
 from app.core.config import settings
+from app.core.metrics import KAFKA_MESSAGES_PRODUCED_TOTAL
 
 log = structlog.get_logger(__name__)
 
@@ -435,10 +493,6 @@ class KafkaProducerClient:
             'bootstrap.servers': settings.KAFKA_BOOTSTRAP_SERVERS,
             'acks': settings.KAFKA_PRODUCER_ACKS,
             'linger.ms': settings.KAFKA_PRODUCER_LINGER_MS,
-            # Para AWS MSK con IAM Auth, se necesitarían más configuraciones.
-            # 'security.protocol': 'SASL_SSL',
-            # 'sasl.mechanisms': 'AWS_MSK_IAM',
-            # Para este proyecto universitario, se asume una red simple sin IAM auth.
         }
         self.producer = Producer(producer_config)
         self.log = log.bind(component="KafkaProducerClient")
@@ -446,10 +500,13 @@ class KafkaProducerClient:
 
     def _delivery_report(self, err, msg):
         """Callback called once for each message produced."""
+        topic = msg.topic()
         if err is not None:
-            self.log.error(f"Message delivery failed to topic '{msg.topic()}'", key=msg.key().decode('utf-8'), error=str(err))
+            self.log.error(f"Message delivery failed to topic '{topic}'", key=msg.key().decode('utf-8'), error=str(err))
+            KAFKA_MESSAGES_PRODUCED_TOTAL.labels(topic=topic, status="failure").inc()
         else:
-            self.log.info(f"Message delivered to topic '{msg.topic()}'", key=msg.key().decode('utf-8'), partition=msg.partition(), offset=msg.offset())
+            self.log.info(f"Message delivered to topic '{topic}'", key=msg.key().decode('utf-8'), partition=msg.partition(), offset=msg.offset())
+            KAFKA_MESSAGES_PRODUCED_TOTAL.labels(topic=topic, status="success").inc()
 
     def produce(self, topic: str, key: str, value: dict):
         """
@@ -467,20 +524,21 @@ class KafkaProducerClient:
                 value=json.dumps(value).encode('utf-8'),
                 callback=self._delivery_report
             )
-            # poll() es crucial para que se envíen los callbacks de entrega
-            # y se procesen los mensajes en el buffer del productor.
             self.producer.poll(0)
         except BufferError:
             self.log.error(
                 "Kafka producer's local queue is full. Messages may be dropped.",
                 topic=topic
             )
-            self.producer.flush() # Intenta forzar el envío
+            KAFKA_MESSAGES_PRODUCED_TOTAL.labels(topic=topic, status="failure").inc()
+            self.producer.flush()
         except KafkaException as e:
             self.log.exception("Failed to produce message to Kafka", topic=topic, error=str(e))
+            KAFKA_MESSAGES_PRODUCED_TOTAL.labels(topic=topic, status="failure").inc()
             raise
         except Exception as e:
             self.log.exception("An unexpected error occurred in Kafka producer", topic=topic, error=str(e))
+            KAFKA_MESSAGES_PRODUCED_TOTAL.labels(topic=topic, status="failure").inc()
             raise
     
     def flush(self):
@@ -613,6 +671,8 @@ boto3 = "^1.34.0"
 # Kafka Producer Client
 confluent-kafka = "^2.4.0"
 
+# Prometheus Metrics Client
+prometheus-client = "^0.20.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.4"
