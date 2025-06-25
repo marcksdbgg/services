@@ -37,8 +37,8 @@ def main():
 
     try:
         # Start Prometheus metrics server
-        start_http_server(8001)
-        log.info("Prometheus metrics server started on port 8001.")
+        start_http_server(8003)
+        log.info("Prometheus metrics server started on port 8003.")
 
         consumer = KafkaConsumerClient(topics=[settings.KAFKA_INPUT_TOPIC])
         producer = KafkaProducerClient()
