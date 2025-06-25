@@ -1,6 +1,9 @@
 # DIAGRAMA general
 
 ```mermaid
+---
+id: d9f72867-e281-4190-86f1-d6590dc1318b
+---
 %%{
   init: {
     "theme": "base",
