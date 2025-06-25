@@ -8,6 +8,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 from app.application.ports.embedding_model_port import EmbeddingModelPort
 from app.core.config import settings
+from app.core.metrics import OPENAI_API_DURATION_SECONDS, OPENAI_API_ERRORS_TOTAL
 
 log = structlog.get_logger(__name__)
 
@@ -26,14 +27,9 @@ class OpenAIAdapter(EmbeddingModelPort):
         self._model_name = settings.OPENAI_EMBEDDING_MODEL_NAME
         self._embedding_dimension = settings.EMBEDDING_DIMENSION
         self._dimensions_override = settings.OPENAI_EMBEDDING_DIMENSIONS_OVERRIDE
-        # Client initialization is deferred to an async method.
         log.info("OpenAIAdapter initialized", model_name=self._model_name, target_dimension=self._embedding_dimension)
 
     async def initialize_model(self):
-        """
-        Initializes the OpenAI client.
-        This should be called during service startup (e.g., lifespan).
-        """
         if self._model_initialized:
             log.debug("OpenAI client already initialized.", model_name=self._model_name)
             return
@@ -55,26 +51,12 @@ class OpenAIAdapter(EmbeddingModelPort):
                 timeout=settings.OPENAI_TIMEOUT_SECONDS,
                 max_retries=0
             )
-
             self._model_initialized = True
             self._initialization_error = None
             duration_ms = (time.perf_counter() - start_time) * 1000
             init_log.info("OpenAI client initialized successfully.", duration_ms=duration_ms)
-
-        except AuthenticationError as e:
-            self._initialization_error = f"OpenAI API Authentication Failed: {e}. Check your API key."
-            init_log.critical(self._initialization_error, exc_info=False)
-            self._client = None
-            self._model_initialized = False
-            raise ConnectionError(self._initialization_error) from e
-        except APIConnectionError as e:
-            self._initialization_error = f"OpenAI API Connection Error: {e}. Check network or OpenAI status."
-            init_log.critical(self._initialization_error, exc_info=True)
-            self._client = None
-            self._model_initialized = False
-            raise ConnectionError(self._initialization_error) from e
         except Exception as e:
-            self._initialization_error = f"Failed to initialize OpenAI client for model '{self._model_name}': {str(e)}"
+            self._initialization_error = f"Failed to initialize OpenAI client: {str(e)}"
             init_log.critical(self._initialization_error, exc_info=True)
             self._client = None
             self._model_initialized = False
@@ -94,13 +76,13 @@ class OpenAIAdapter(EmbeddingModelPort):
     )
     async def embed_texts(self, texts: List[str]) -> List[List[float]]:
         if not self._model_initialized or not self._client:
-            log.error("OpenAI client not initialized. Cannot generate embeddings.", init_error=self._initialization_error)
+            log.error("OpenAI client not initialized.", init_error=self._initialization_error)
             raise ConnectionError("OpenAI embedding model is not available.")
 
         if not texts:
             return []
 
-        embed_log = log.bind(adapter="OpenAIAdapter", action="embed_texts", num_texts=len(texts), model=self._model_name)
+        embed_log = log.bind(adapter="OpenAIAdapter", num_texts=len(texts), model=self._model_name)
         embed_log.debug("Generating embeddings via OpenAI API...")
 
         try:
@@ -112,46 +94,38 @@ class OpenAIAdapter(EmbeddingModelPort):
             if self._dimensions_override is not None:
                 api_params["dimensions"] = self._dimensions_override
 
-            response = await self._client.embeddings.create(**api_params)
+            with OPENAI_API_DURATION_SECONDS.labels(model_name=self._model_name).time():
+                response = await self._client.embeddings.create(**api_params)
 
             if not response.data or not all(item.embedding for item in response.data):
-                embed_log.error("OpenAI API returned no embedding data or empty embeddings.", api_response=response.model_dump_json(indent=2))
                 raise ValueError("OpenAI API returned no valid embedding data.")
 
-            if response.data and response.data[0].embedding:
-                actual_dim = len(response.data[0].embedding)
-                if actual_dim != self._embedding_dimension:
-                    embed_log.warning(
-                        "Dimension mismatch in OpenAI response.",
-                        expected_dim=self._embedding_dimension,
-                        actual_dim=actual_dim,
-                        model_used=response.model
-                    )
-
             embeddings_list = [item.embedding for item in response.data]
-            embed_log.debug("Embeddings generated successfully via OpenAI.", num_embeddings=len(embeddings_list), usage_tokens=response.usage.total_tokens if response.usage else "N/A")
             return embeddings_list
         except AuthenticationError as e:
-            embed_log.error("OpenAI API Authentication Error during embedding", error=str(e))
+            embed_log.error("OpenAI API Authentication Error", error=str(e))
+            OPENAI_API_ERRORS_TOTAL.labels(model_name=self._model_name, error_type="authentication_error").inc()
             raise ConnectionError(f"OpenAI authentication failed: {e}") from e
         except RateLimitError as e:
-            embed_log.error("OpenAI API Rate Limit Exceeded during embedding", error=str(e))
+            embed_log.error("OpenAI API Rate Limit Exceeded", error=str(e))
+            OPENAI_API_ERRORS_TOTAL.labels(model_name=self._model_name, error_type="rate_limit_error").inc()
             raise OpenAIError(f"OpenAI rate limit exceeded: {e}") from e
         except APIConnectionError as e:
-            embed_log.error("OpenAI API Connection Error during embedding", error=str(e))
+            embed_log.error("OpenAI API Connection Error", error=str(e))
+            OPENAI_API_ERRORS_TOTAL.labels(model_name=self._model_name, error_type="connection_error").inc()
             raise OpenAIError(f"OpenAI connection error: {e}") from e
         except OpenAIError as e:
-            embed_log.error(f"OpenAI API Error during embedding: {type(e).__name__}", error=str(e))
+            error_type = type(e).__name__
+            embed_log.error(f"OpenAI API Error: {error_type}", error=str(e))
+            OPENAI_API_ERRORS_TOTAL.labels(model_name=self._model_name, error_type=error_type).inc()
             raise RuntimeError(f"OpenAI API error: {e}") from e
         except Exception as e:
             embed_log.exception("Unexpected error during OpenAI embedding process")
+            OPENAI_API_ERRORS_TOTAL.labels(model_name=self._model_name, error_type="unexpected_error").inc()
             raise RuntimeError(f"Embedding generation failed with unexpected error: {e}") from e
 
     def get_model_info(self) -> Dict[str, Any]:
-        return {
-            "model_name": self._model_name,
-            "dimension": self._embedding_dimension,
-        }
+        return { "model_name": self._model_name, "dimension": self._embedding_dimension }
 
     async def health_check(self) -> Tuple[bool, str]:
         if self._model_initialized and self._client:

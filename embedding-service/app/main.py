@@ -5,7 +5,8 @@ import asyncio
 import structlog
 from typing import Any, List, Generator, Dict
 
-# Configurar logging primero que nada
+from prometheus_client import start_http_server
+
 from app.core.logging_config import setup_logging
 setup_logging()
 
@@ -13,6 +14,11 @@ from app.core.config import settings
 from app.services.kafka_clients import KafkaConsumerClient, KafkaProducerClient, KafkaError
 from app.infrastructure.embedding_models.openai_adapter import OpenAIAdapter
 from app.application.use_cases.embed_texts_use_case import EmbedTextsUseCase
+from app.core.metrics import (
+    MESSAGES_CONSUMED_TOTAL,
+    BATCH_PROCESSING_DURATION_SECONDS,
+    TEXTS_PROCESSED_TOTAL,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -20,6 +26,10 @@ def main():
     """Punto de entrada principal para el worker de embeddings."""
     log.info("Initializing Embedding Worker...")
     try:
+        # Start Prometheus metrics server
+        start_http_server(8002)
+        log.info("Prometheus metrics server started on port 8002.")
+
         openai_adapter = OpenAIAdapter()
         asyncio.run(openai_adapter.initialize_model())
         use_case = EmbedTextsUseCase(embedding_model=openai_adapter)
@@ -57,10 +67,13 @@ def batch_consumer(consumer: KafkaConsumerClient, batch_size: int, batch_timeout
             if msg.error().code() != KafkaError._PARTITION_EOF:
                 log.error("Kafka consumer poll error", error=msg.error())
             continue
+        
+        MESSAGES_CONSUMED_TOTAL.labels(topic=msg.topic(), partition=msg.partition()).inc()
         batch.append(msg)
         if len(batch) >= batch_size:
             yield batch; batch = []
 
+@BATCH_PROCESSING_DURATION_SECONDS.time()
 def process_message_batch(message_batch: List[Any], use_case: EmbedTextsUseCase, producer: KafkaProducerClient):
     batch_log = log.bind(batch_size=len(message_batch))
     texts_to_embed, metadata_list = [], []
@@ -87,13 +100,15 @@ def process_message_batch(message_batch: List[Any], use_case: EmbedTextsUseCase,
 
         for i, vector in enumerate(embeddings):
             meta = metadata_list[i]
+            company_id = meta.get("company_id", "unknown")
             output_payload = {
                 "chunk_id": meta.get("chunk_id"),
                 "document_id": meta.get("document_id"),
-                "company_id": meta.get("company_id"), 
+                "company_id": company_id, 
                 "vector": vector,
             }
             producer.produce(settings.KAFKA_OUTPUT_TOPIC, key=str(meta.get("document_id")), value=output_payload)
+            TEXTS_PROCESSED_TOTAL.labels(company_id=company_id).inc()
         
         batch_log.info(f"Processed and produced {len(embeddings)} embeddings.")
     except Exception as e:

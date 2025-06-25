@@ -1,54 +1,111 @@
 # DIAGRAMA general
 
 ```mermaid
-%%{init: { 'theme':'base',
-           'themeVariables': { 'primaryColor':'#b3e6ff',
-                               'edgeLabelBackground':'#ffffff',
-                               'lineColor':'#555' }}}%%
-flowchart LR
-  subgraph VPC
-    direction LR
+%%{
+  init: {
+    "theme": "base",
+    "themeVariables": {
+      /*  ─── Colores base del diagrama ─────────────────────────── */
+      "primaryColor":       "#154360",   /* azul muy oscuro p/ bordes de clúster */
+      "primaryTextColor":   "#FFFFFF",
+      "primaryBorderColor": "#154360",
+      "lineColor":          "#1A5276",   /* azul intermedio → buenas flechas   */
+      "secondaryColor":     "#F8F9F9",  /* gris muy claro → fondo clúster     */
+      "tertiaryColor":      "#D5DBDB",
+      "edgeLabelBackground":"#FDF2E9",  /* beige suave → los textos flotan     */
+      "clusterBkg":         "#FBFCFD"   /* fondo dentro de clústeres           */
+    }
+  }
+}%%
 
-    %%–– Clúster de microservicios
-    subgraph EKS["Amazon EKS Cluster\n(FastAPI microservices)"]
+graph TD
+    linkStyle default stroke-width:1.5px
+
+    %% ─────────── DEFINICIÓN DE CLASES (altos contraste) ───────────
+    classDef microservice fill:#007BFF,stroke:#0B5394,color:#FFFFFF
+    classDef datastore   fill:#E67E22,stroke:#9C640C,color:#000000
+    classDef broker      fill:#138D75,stroke:#0B5345,color:#FFFFFF
+    classDef bigdata     fill:#8E44AD,stroke:#512E5F,color:#FFFFFF
+    classDef monitoring  fill:#C0392B,stroke:#922B21,color:#FFFFFF
+    classDef external    fill:#F4D03F,stroke:#B7950B,color:#000000
+
+    %% ─────────── ACTOR ───────────
+    User[<fa:fa-user> User / Client]:::external
+
+    %% ─────────── AWS VPC ───────────
+    subgraph AWS_VPC["AWS VPC"]
       direction TB
-      Ingest[Ingest Service]
-      DocProc[DocProc Service]
-      EmbedSvc[Embedding Service]
-      APIGW[API Gateway]
-      Ingest -->|POST /upload| APIGW
+
+      %% Amazon MSK
+      subgraph MSK["Amazon MSK (Managed Kafka)"]
+        direction TB
+        Kafka((<fa:fa-random> Kafka Broker)):::broker
+      end
+
+      %% MSK Connect
+      subgraph MSK_Connect["Amazon MSK Connect"]
+        HDFSSink["HDFS Sink<br/>Connector"]:::bigdata
+      end
+
+      %% ECS / Fargate
+      subgraph ECS["ECS Cluster – Microservices"]
+        direction LR
+        Ingest["ingest-service<br/>(port&nbsp;8000)"]:::microservice
+        DocProc["docproc-service<br/>(worker)"]:::microservice
+        EmbedSvc["embedding-service<br/>(worker)"]:::microservice
+      end
+
+      %% EMR
+      subgraph EMR_Cluster["Amazon EMR Cluster"]
+        direction TB
+        Flink["Flink Job<br/>(streaming)"]:::bigdata
+        Spark["Spark Job<br/>(batch)"]:::bigdata
+        HDFS[(<fa:fa-database> HDFS)]:::datastore
+      end
+
+      %% Monitoring
+      subgraph Monitoring["Monitoring"]
+        direction LR
+        Prom[<fa:fa-chart-bar> Prometheus]:::monitoring
+        Graf[<fa:fa-chart-area> Grafana]:::monitoring
+      end
+
+      %% Almacenamiento y externos
+      S3[<fa:fa-aws> Amazon S3 Bucket]:::datastore
+      OpenAI[[<fa:fa-cloud> OpenAI API]]:::external
+      Dashboards[[<fa:fa-tv> Analytics Dashboards]]:::external
     end
 
-    %%–– Plataforma de mensajería
-    MSK((Amazon MSK\nKafka Cluster))
-    Connect["MSK Connect\nHDFS Sink Connector"]
+    %% ─────────── FLUJOS ───────────
+    %% Ingesta
+    User   -- "HTTPS POST"                  --> Ingest
+    Ingest -- "1· upload file"              --> S3
+    Ingest -- "2· produce documents.raw"    --> Kafka
 
-    %%–– Clúster de datos
-    subgraph EMR["Amazon EMR 7.x\n(Hadoop · HDFS · Flink · Spark)"]
-      direction TB
-      HDFS[(HDFS Storage)]
-      FlinkRT["Flink Job\n(real-time)"]
-      SparkBatch["Spark Batch\n(02:00)"]
-      FlinkRT -->|Parquet opc.| HDFS
-      SparkBatch -->|Parquet resumen| HDFS
-    end
+    %% Procesamiento de documento
+    Kafka    -- "documents.raw"               --> DocProc
+    DocProc  -- "3· download file"            --> S3
+    DocProc  -- "4· produce chunks.processed" --> Kafka
 
-    Redis[(Redis / ElasticSearch)]
-  end
+    %% Embeddings
+    Kafka    -- "chunks.processed"            --> EmbedSvc
+    EmbedSvc -- "5· get embeddings"           --> OpenAI
+    EmbedSvc -- "6· produce embeddings.ready" --> Kafka
 
-  %%–– flujos Kafka
-  Ingest -- produce --> MSK
-  DocProc -- produce/consume --> MSK
-  EmbedSvc -- produce/consume --> MSK
-  FlinkRT -- consume --> MSK
-  FlinkRT -- produce --> MSK
-  MSK -- sink --> Connect -.-> HDFS
+    %% Streaming Analytics
+    Kafka  -- "embeddings.ready"            --> Flink
+    Flink  -- "7· produce analytics.flink"   --> Kafka
+    Kafka  -- "analytics.flink"             --> Dashboards
 
-  %%–– métricas tiempo real
-  FlinkRT -- metrics --> Redis
+    %% Persistencia
+    Kafka     -- "consume ALL topics" --> HDFSSink
+    HDFSSink  -- "sink →"             --> HDFS
+    Spark     -- "read daily data"    --> HDFS
+    Flink     -- "reads / writes"     --> HDFS
 
-  classDef topic fill:#ffd6cc;
-  class MSK topic
-
-
+    %% Monitoring
+    Ingest   -- "/metrics 8000" --> Prom
+    DocProc  -- "/metrics 8001" --> Prom
+    EmbedSvc -- "/metrics 8002" --> Prom
+    Prom     -- "queries"       --> Graf
 ```

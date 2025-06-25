@@ -5,6 +5,7 @@ from confluent_kafka import Consumer, Producer, KafkaError, KafkaException
 from typing import Optional, Generator, Any, Dict
 
 from app.core.config import settings
+from app.core.metrics import KAFKA_MESSAGES_PRODUCED_TOTAL
 
 log = structlog.get_logger(__name__)
 
@@ -19,10 +20,13 @@ class KafkaProducerClient:
         self.log = log.bind(component="KafkaProducerClient")
 
     def _delivery_report(self, err, msg):
+        topic = msg.topic()
         if err is not None:
-            self.log.error(f"Message delivery failed to topic '{msg.topic()}'", error=str(err))
+            self.log.error(f"Message delivery failed to topic '{topic}'", error=str(err))
+            KAFKA_MESSAGES_PRODUCED_TOTAL.labels(topic=topic, status="failure").inc()
         else:
-            self.log.debug(f"Message delivered to {msg.topic()} [{msg.partition()}]")
+            self.log.debug(f"Message delivered to {topic} [{msg.partition()}]")
+            KAFKA_MESSAGES_PRODUCED_TOTAL.labels(topic=topic, status="success").inc()
 
     def produce(self, topic: str, key: str, value: Dict[str, Any]):
         try:
@@ -34,6 +38,7 @@ class KafkaProducerClient:
             )
         except KafkaException as e:
             self.log.exception("Failed to produce message", error=str(e))
+            KAFKA_MESSAGES_PRODUCED_TOTAL.labels(topic=topic, status="failure").inc()
             raise
 
     def flush(self, timeout: float = 10.0):

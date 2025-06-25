@@ -7,6 +7,7 @@ import structlog
 from typing import Optional
 
 from app.core.config import settings
+from app.core.metrics import S3_DOWNLOAD_DURATION_SECONDS
 
 log = structlog.get_logger(__name__)
 
@@ -31,7 +32,8 @@ class S3Client:
         """Downloads a file from S3 to a local path (anonymous access)."""
         self.log.info("Downloading file from S3...", object_name=object_name, target_path=download_path)
         try:
-            self.s3_client.download_file(self.bucket_name, object_name, download_path)
+            with S3_DOWNLOAD_DURATION_SECONDS.time():
+                self.s3_client.download_file(self.bucket_name, object_name, download_path)
             self.log.info("File downloaded successfully from S3.", object_name=object_name)
         except ClientError as e:
             code = e.response['Error']['Code']

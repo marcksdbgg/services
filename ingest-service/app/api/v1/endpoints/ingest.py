@@ -13,6 +13,7 @@ from app.core.config import settings
 from app.api.v1.schemas import IngestResponse
 from app.services.s3_client import S3Client, S3ClientError
 from app.services.kafka_producer import KafkaProducerClient, KafkaException
+from app.core.metrics import UPLOADS_TOTAL, UPLOAD_FILE_SIZE_BYTES
 
 log = structlog.get_logger(__name__)
 router = APIRouter()
@@ -39,12 +40,14 @@ async def upload_document(
     s3_client: S3Client = Depends(get_s3_client),
     kafka_producer: KafkaProducerClient = Depends(get_kafka_producer),
 ):
-    company_id = request.headers.get("X-Company-ID", "default-company") # Usar un valor por defecto si no viene
+    company_id = request.headers.get("X-Company-ID", "default-company")
+    content_type = file.content_type
     
-    endpoint_log = log.bind(company_id=company_id, filename=file.filename)
+    endpoint_log = log.bind(company_id=company_id, filename=file.filename, content_type=content_type)
     endpoint_log.info("Document upload request received.")
 
-    if file.content_type not in settings.SUPPORTED_CONTENT_TYPES:
+    if content_type not in settings.SUPPORTED_CONTENT_TYPES:
+        UPLOADS_TOTAL.labels(company_id=company_id, content_type=content_type, status="error_client").inc()
         raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="Unsupported file type")
 
     document_id = str(uuid.uuid4())
@@ -53,12 +56,15 @@ async def upload_document(
     
     try:
         file_content = await file.read()
-        await s3_client.upload_file_async(s3_path, file_content, file.content_type)
+        UPLOAD_FILE_SIZE_BYTES.labels(company_id=company_id, content_type=content_type).observe(len(file_content))
+        
+        await s3_client.upload_file_async(s3_path, file_content, content_type)
         
         kafka_payload = {
             "document_id": document_id,
             "company_id": company_id,
-            "s3_path": s3_path
+            "s3_path": s3_path,
+            "content_type": content_type # Add content_type for consumer
         }
         kafka_producer.produce(
             topic=settings.KAFKA_DOCUMENTS_RAW_TOPIC,
@@ -66,9 +72,11 @@ async def upload_document(
             value=kafka_payload
         )
         endpoint_log.info("File uploaded to S3 and message produced to Kafka.", s3_path=s3_path)
+        UPLOADS_TOTAL.labels(company_id=company_id, content_type=content_type, status="success").inc()
 
     except (S3ClientError, KafkaException) as e:
         endpoint_log.exception("Error during S3 upload or Kafka production", error=str(e))
+        UPLOADS_TOTAL.labels(company_id=company_id, content_type=content_type, status="error_server").inc()
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to process file upload.")
     finally:
         await file.close()
