@@ -1,0 +1,40 @@
+# prometheus.yml
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # CORREGIDO: Apuntando al puerto 8001 y verificando la ruta
+  - job_name: "ingest-service"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["localhost:8001"]
+        labels:
+          service: "ingest"
+
+  # CORREGIDO: Se añade la ruta de métricas correcta para el worker
+  - job_name: "docproc-service"
+    metrics_path: /
+    static_configs:
+      - targets: ["localhost:8003"]
+        labels:
+          service: "docproc"
+
+  # CORREGIDO: Se añade la ruta de métricas correcta para el worker
+  - job_name: "embedding-service"
+    metrics_path: /
+    static_configs:
+      - targets: ["localhost:8002"]
+        labels:
+          service: "embedding"
+  
+  # Job para Flink (asumiendo que Flink exporta en el puerto 9250)
+  - job_name: "flink-cluster"
+    static_configs:
+      - targets: ["localhost:9250"] # Asegúrate de que el reporter de Flink-Prometheus usa esta ruta y puerto
+        labels:
+          service: "flink"

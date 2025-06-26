@@ -49,4 +49,21 @@ Politica del bucket:
     ]
 }
 
+
+EJECUTAR JOB:
+
+SLOTS=2
+TM_MEM=2048m
+CONNECTOR_JAR=~/jars/flink-connector-kafka-3.4.0-1.20.jar   # ajusta si lo copiaste a /lib
+
+flink run-application \
+  -t yarn-application \
+  -Dyarn.application.name="FlinkRealTime" \
+  -Dtaskmanager.numberOfTaskSlots=${SLOTS} \
+  -Dtaskmanager.memory.process.size=${TM_MEM} \
+  --parallelism ${SLOTS} \
+  --jarfile ${CONNECTOR_JAR} \
+  -py analytics_rt.py
+
+
 txt.
