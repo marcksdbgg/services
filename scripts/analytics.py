@@ -12,13 +12,11 @@ import logging
 import sys
 import time
 
-# --- CORRECCIÓN CLAVE: Se importa DeliveryGuarantee desde su módulo correcto ---
 from pyflink.datastream.connectors.kafka import (
     KafkaSource, KafkaSink, KafkaOffsetsInitializer, DeliveryGuarantee
 )
 from pyflink.common import Time as FlinkTime, WatermarkStrategy, Types, Encoder
 from pyflink.common.restart_strategy import RestartStrategies
-from pyflink.common.time import Duration
 from pyflink.datastream import StreamExecutionEnvironment
 from pyflink.datastream.window import TumblingProcessingTimeWindows
 from pyflink.common.serialization import SimpleStringSchema
@@ -99,9 +97,13 @@ def run_job():
     env = StreamExecutionEnvironment.get_execution_environment()
     env.set_parallelism(1)
     env.enable_checkpointing(30000)
+    
+    # --- CORRECCIÓN CLAVE: El intervalo de delay debe ser en milisegundos (int) ---
     env.set_restart_strategy(RestartStrategies.fixed_delay_restart(
-        3, FlinkTime.seconds(10)
+        attempt_rate=3,          # 3 intentos
+        delay_interval=10000     # 10 segundos en milisegundos
     ))
+    
     define_workflow(env)
     env.execute("RealTimeChunkCountPerCompany")
 
