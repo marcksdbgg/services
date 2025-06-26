@@ -12,14 +12,15 @@ import logging
 import sys
 import time
 
+# --- CORRECCIÓN CLAVE: Se importa DeliveryGuarantee desde su módulo correcto ---
+from pyflink.datastream.connectors.kafka import (
+    KafkaSource, KafkaSink, KafkaOffsetsInitializer, DeliveryGuarantee
+)
 from pyflink.common import Time as FlinkTime, WatermarkStrategy, Types, Encoder
 from pyflink.common.restart_strategy import RestartStrategies
 from pyflink.common.time import Duration
-from pyflink.datastream import StreamExecutionEnvironment, DeliveryGuarantee
+from pyflink.datastream import StreamExecutionEnvironment
 from pyflink.datastream.window import TumblingProcessingTimeWindows
-from pyflink.datastream.connectors.kafka import (
-    KafkaSource, KafkaSink, KafkaOffsetsInitializer
-)
 from pyflink.common.serialization import SimpleStringSchema
 
 # --- Configuración desde variables de entorno ---
@@ -63,7 +64,7 @@ def define_workflow(env: StreamExecutionEnvironment):
                 return (data['company_id'], 1)
         except (json.JSONDecodeError, TypeError):
             LOG.warning(f"Mensaje inválido o malformado omitido: {line[:100]}")
-        return ("error_parsing", 1) # Contar errores de parsing también
+        return ("error_parsing", 1)
 
     company_counts = stream \
         .map(safe_parse, output_type=Types.TUPLE([Types.STRING(), Types.INT()])) \
@@ -81,8 +82,6 @@ def define_workflow(env: StreamExecutionEnvironment):
         })
 
     output_stream = company_counts.map(to_json_output, output_type=Types.STRING())
-
-    # Imprimir en logs para debugging
     output_stream.print()
 
     kafka_sink = KafkaSink.builder() \
@@ -98,8 +97,8 @@ def define_workflow(env: StreamExecutionEnvironment):
 def run_job():
     """Configura el entorno y ejecuta el job."""
     env = StreamExecutionEnvironment.get_execution_environment()
-    env.set_parallelism(1)  # Mantener simple para depuración
-    env.enable_checkpointing(30000) # Checkpoint cada 30 segundos
+    env.set_parallelism(1)
+    env.enable_checkpointing(30000)
     env.set_restart_strategy(RestartStrategies.fixed_delay_restart(
         3, FlinkTime.seconds(10)
     ))

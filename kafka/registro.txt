@@ -65,5 +65,9 @@ flink run-application \
   --jarfile ${CONNECTOR_JAR} \
   -py analytics_rt.py
 
+Ver logs con:
+
+yarn logs -applicationId application_1750889335808_0006 | grep "\["
+
 
 txt.
